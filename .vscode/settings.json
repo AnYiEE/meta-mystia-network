@@ -13,5 +13,5 @@
     "Cargo.toml": ".editorconfig, .git*, Cargo.lock",
     "README.md": "LICENSE"
   },
-  "cSpell.words": ["cdylib", "codegen", "metamystia", "mystia"]
+  "cSpell.words": ["cdylib", "codegen", "metamystia", "mystia", "winres"]
 }

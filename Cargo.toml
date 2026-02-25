@@ -3,7 +3,7 @@ name = "meta-mystia-network"
 version = "0.0.0"
 authors = ["AnYiEE <i@anyi.in>"]
 edition = "2024"
-description = "A common P2P network library for MetaMystia Mod (https://github.com/MetaMikuAI/MetaMystia). Repository: https://github.com/AnYiEE/meta-mystia-network"
+description = "A P2P network library for MetaMystia Mod (https://github.com/MetaMikuAI/MetaMystia). Repository: https://github.com/AnYiEE/meta-mystia-network"
 license = "AGPL-3.0-only"
 
 [profile.release]
@@ -20,6 +20,7 @@ thunk-rs = { version = "0.3", features = [
   "lib",
   "win7",
 ], default-features = false }
+winres = "0.1"
 
 [lib]
 crate-type = ["cdylib"]
