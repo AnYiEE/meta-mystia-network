@@ -13,7 +13,37 @@ opt-level = "z"
 panic = "abort"
 strip = "symbols"
 
+[features]
+default = []
+logging = ["dep:tracing-subscriber"]
+
 [dependencies]
+bytes = "1"
+futures-util = { version = "0.3", features = ["sink"] }
+hostname = "0.4"
+lz4_flex = { version = "0.12", default-features = false }
+mdns-sd = { version = "0.18", features = ["async"], default-features = false }
+parking_lot = "0.12"
+postcard = { version = "1.1", features = ["alloc"], default-features = false }
+rand = { version = "0.9", features = [
+  "std",
+  "thread_rng",
+], default-features = false }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+  "env-filter",
+], optional = true }
+socket2 = "0.6"
 
 [build-dependencies]
 thunk-rs = { version = "0.3", features = [
