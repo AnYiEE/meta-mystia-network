@@ -1,0 +1,25 @@
+[package]
+name = "meta-mystia-network"
+version = "0.0.0"
+authors = ["AnYiEE <i@anyi.in>"]
+edition = "2024"
+description = "A common P2P network library for MetaMystia Mod (https://github.com/MetaMikuAI/MetaMystia). Repository: https://github.com/AnYiEE/meta-mystia-network"
+license = "AGPL-3.0-only"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
+
+[dependencies]
+
+[build-dependencies]
+thunk-rs = { version = "0.3", features = [
+  "lib",
+  "win7",
+], default-features = false }
+
+[lib]
+crate-type = ["cdylib"]
