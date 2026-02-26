@@ -296,3 +296,88 @@ impl CallbackManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static CONNECTION_CALLED: AtomicBool = AtomicBool::new(false);
+    static LEADER_CALLED: AtomicBool = AtomicBool::new(false);
+    static STATUS_CALLED: AtomicBool = AtomicBool::new(false);
+    static RECEIVE_CALLED: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "C" fn conn_cb(addr: *const c_char, success: u8, _code: i32) {
+        let s = unsafe { CStr::from_ptr(addr) }.to_str().unwrap();
+        if s == "foo" && success == 1 {
+            CONNECTION_CALLED.store(true, Ordering::Relaxed);
+        }
+    }
+
+    unsafe extern "C" fn leader_cb(id: *const c_char) {
+        let _ = unsafe { CStr::from_ptr(id) }.to_str().unwrap();
+        LEADER_CALLED.store(true, Ordering::Relaxed);
+    }
+
+    unsafe extern "C" fn status_cb(id: *const c_char, _status: i32) {
+        let _ = unsafe { CStr::from_ptr(id) }.to_str().unwrap();
+        STATUS_CALLED.store(true, Ordering::Relaxed);
+    }
+
+    unsafe extern "C" fn recv_cb(
+        id: *const c_char,
+        _data: *const u8,
+        _len: i32,
+        _msg_type: u16,
+        _flags: u8,
+    ) {
+        let _ = unsafe { CStr::from_ptr(id) }.to_str().unwrap();
+        RECEIVE_CALLED.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_registration_and_delivery() {
+        let mgr = CallbackManager::new();
+        mgr.register_connection_result_callback(Some(conn_cb));
+        mgr.register_leader_changed_callback(Some(leader_cb));
+        mgr.register_peer_status_callback(Some(status_cb));
+        mgr.register_receive_callback(Some(recv_cb));
+
+        mgr.send_connection_result("foo", true, 0);
+        mgr.send_leader_changed(Some(&PeerId::new("x")));
+        mgr.send_peer_status(&PeerId::new("y"), 5);
+        mgr.send_received(&PeerId::new("z"), Bytes::from(&b"hi"[..]), 0x100, 3);
+
+        // give the callback thread a moment to dequeue and dispatch
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // shut down thread so that all events are flushed
+        mgr.drain_and_shutdown();
+        mgr.join_thread();
+
+        assert!(CONNECTION_CALLED.load(Ordering::Relaxed));
+        assert!(LEADER_CALLED.load(Ordering::Relaxed));
+        assert!(STATUS_CALLED.load(Ordering::Relaxed));
+        assert!(RECEIVE_CALLED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_unregister_and_shutdown() {
+        let mgr = CallbackManager::new();
+        mgr.register_connection_result_callback(None);
+        mgr.register_leader_changed_callback(None);
+        mgr.register_peer_status_callback(None);
+        mgr.register_receive_callback(None);
+
+        // sending events with no callbacks should not panic
+        mgr.send_event(CallbackEvent::ConnectionResult {
+            addr: "a".into(),
+            success: false,
+            error_code: 1,
+        });
+
+        mgr.drain_and_shutdown();
+        mgr.join_thread();
+    }
+}

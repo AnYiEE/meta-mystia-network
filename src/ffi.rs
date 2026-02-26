@@ -128,6 +128,31 @@ impl From<&NetworkConfigFFI> for NetworkConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // CString imported when needed by individual tests
+
+    #[test]
+    fn test_c_str_to_string_null() {
+        let err = unsafe { c_str_to_string(std::ptr::null()) };
+        assert!(matches!(err, Err(NetworkError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn test_return_string_and_last_error() {
+        let ptr = return_string("hello".into());
+        let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap() };
+        assert_eq!(s, "hello");
+
+        set_error(123, "oops");
+        let guard = LAST_ERROR.lock();
+        let pair = guard.as_ref().unwrap();
+        assert_eq!(pair.0, 123);
+        assert_eq!(pair.1, "oops");
+    }
+}
+
 /// Initialize the network stack with the given peer and session IDs.
 /// Returns 0 (`error_codes::OK`) on success or an error code on failure.
 #[unsafe(no_mangle)]

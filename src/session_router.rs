@@ -236,3 +236,80 @@ impl SessionRouter {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::config::NetworkConfig;
+    use crate::leader::LeaderElection;
+    use crate::membership::MembershipManager;
+    use crate::transport::TransportManager;
+    use crate::types::PeerId;
+
+    async fn make_router() -> SessionRouter {
+        let local = PeerId::new("local");
+        let config = NetworkConfig::default();
+        let (transport, _incoming) = TransportManager::new(
+            local.clone(),
+            "session".into(),
+            config,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let membership = Arc::new(MembershipManager::new(local.clone(), config));
+        let (tx, _rx) = mpsc::channel(16);
+        let leader = Arc::new(LeaderElection::new(
+            local.clone(),
+            false,
+            membership.event_tx.subscribe(),
+            tx,
+        ));
+        SessionRouter::new(local, Arc::clone(&transport), Arc::clone(&leader), config)
+    }
+
+    #[tokio::test]
+    async fn invalid_msg_type_errors() {
+        let router = make_router().await;
+        let e = router
+            .route_message(MessageTarget::Broadcast, 0x0001, b"", 0)
+            .unwrap_err();
+        assert!(matches!(e, NetworkError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn not_leader_errors() {
+        let router = make_router().await;
+        assert!(matches!(
+            router.send_from_leader(0x0100, b"x", 0),
+            Err(NetworkError::NotLeader)
+        ));
+        let local = PeerId::new("local");
+        assert!(matches!(
+            router.forward_message(&local, ForwardTarget::Broadcast, 0x0100, 0, b""),
+            Err(NetworkError::NotLeader)
+        ));
+
+        // centralized broadcast when not leader should also fail
+        router.set_centralized(true);
+        let e = router
+            .route_message(MessageTarget::Broadcast, 0x0100, b"", 0)
+            .unwrap_err();
+        assert!(matches!(e, NetworkError::NotLeader));
+    }
+
+    #[tokio::test]
+    async fn handle_forwarded_user_data_preserves_packet() {
+        let router = make_router().await;
+        let raw = router.handle_forwarded_user_data("peer", 0x0100, 5, b"abc");
+        let pkt = raw.unwrap();
+        assert_eq!(pkt.msg_type, 0x0100);
+        assert_eq!(pkt.flags, 5);
+        assert_eq!(&pkt.payload[..], b"abc");
+    }
+}
