@@ -1,3 +1,7 @@
+//! Leader election logic implementing a simple Raft-like
+//! protocol. Handles term management, voting, heartbeats and
+//! manual overrides.
+
 use std::collections::HashSet;
 
 use parking_lot::{Mutex, RwLock};
@@ -7,30 +11,53 @@ use crate::membership::MembershipEvent;
 use crate::types::PeerId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Current state of this node in the leader election FSM.
 pub enum Role {
     Follower,
     Candidate,
     Leader,
 }
 
+/// Internal state guarded by the `RwLock`. Grouped by purpose.
 struct ElectionState {
+    // persistent term/role information
     role: Role,
     current_term: u64,
+
+    // voting state for current term
     voted_for: Option<PeerId>,
-    leader_id: Option<PeerId>,
     votes_received: HashSet<PeerId>,
+
+    // known leader for this term (if any)
+    leader_id: Option<PeerId>,
+
+    // configuration toggles
     auto_election_enabled: bool,
     manual_override: bool,
 }
 
+/// Coordinates leader election using a simplified Raft-style
+/// algorithm. It receives membership events to maintain a count of
+/// connected peers and sends leader change notifications via the
+/// provided channel.
 pub struct LeaderElection {
+    // identity
     local_peer_id: PeerId,
+
+    // shared election state
     state: RwLock<ElectionState>,
+
+    // incoming membership change stream
     membership_rx: Mutex<broadcast::Receiver<MembershipEvent>>,
+
+    // outgoing notifications when leader changes (Some(id) or None)
     leader_change_tx: mpsc::Sender<Option<PeerId>>,
 }
 
 impl LeaderElection {
+    /// Construct a new election instance. Needs the local ID, a
+    /// flag indicating whether automatic elections are desired, and
+    /// channels for membership updates and leader notifications.
     pub fn new(
         local_peer_id: PeerId,
         auto_election_enabled: bool,
@@ -43,8 +70,8 @@ impl LeaderElection {
                 role: Role::Follower,
                 current_term: 0,
                 voted_for: None,
-                leader_id: None,
                 votes_received: HashSet::new(),
+                leader_id: None,
                 auto_election_enabled,
                 manual_override: false,
             }),
@@ -53,22 +80,28 @@ impl LeaderElection {
         }
     }
 
+    /// Return the current role (Follower/Candidate/Leader).
     pub fn role(&self) -> Role {
         self.state.read().role
     }
 
+    /// Get the current election term.
     pub fn current_term(&self) -> u64 {
         self.state.read().current_term
     }
 
+    /// Returns the `PeerId` of the known leader (if any).
     pub fn leader_id(&self) -> Option<PeerId> {
         self.state.read().leader_id.clone()
     }
 
+    /// Convenience helper: true if we currently consider ourselves
+    /// the leader.
     pub fn is_leader(&self) -> bool {
         self.state.read().role == Role::Leader
     }
 
+    /// Returns whether automatic elections are enabled.
     pub fn is_auto_election_enabled(&self) -> bool {
         self.state.read().auto_election_enabled
     }
@@ -81,6 +114,9 @@ impl LeaderElection {
         }
     }
 
+    /// Trigger a new election if automatic elections are enabled.
+    /// Returns `(term, candidate_id)` if a vote request should be
+    /// broadcast; otherwise `None`.
     pub fn start_election(&self, connected_peer_count: usize) -> Option<(u64, String)> {
         let mut state = self.state.write();
         if !state.auto_election_enabled || state.manual_override {
@@ -108,6 +144,9 @@ impl LeaderElection {
         Some((term, self.local_peer_id.as_str().to_owned()))
     }
 
+    /// Process an incoming `RequestVote` RPC from another peer.
+    /// Returns the current term and a boolean indicating whether the
+    /// vote is granted.
     pub fn handle_request_vote(&self, term: u64, candidate_id: &str) -> (u64, bool) {
         let mut state = self.state.write();
 
@@ -134,6 +173,8 @@ impl LeaderElection {
         (state.current_term, granted)
     }
 
+    /// Handle a vote response received during an election.
+    /// Returns an updated `(term, majority_reached)` tuple.
     pub fn handle_vote_response(
         &self,
         term: u64,
@@ -170,6 +211,8 @@ impl LeaderElection {
         false
     }
 
+    /// Process a heartbeat message from the current leader. Returns
+    /// `true` if the term is valid and the heartbeat was accepted.
     pub fn handle_heartbeat(&self, term: u64, leader_id: &str) -> bool {
         let mut state = self.state.write();
 
@@ -208,6 +251,9 @@ impl LeaderElection {
         true
     }
 
+    /// Manually assign a leader for the given term. Used when a
+    /// client indicates a leader change outside of the normal
+    /// election process.
     pub fn handle_leader_assign(&self, term: u64, leader_id: &str, _assigner_id: &str) {
         let mut state = self.state.write();
 
@@ -236,6 +282,8 @@ impl LeaderElection {
         }
     }
 
+    /// Force the local node to become leader, returning the old
+    /// term and IDs for bookkeeping.
     pub fn set_leader(&self, leader_id: &PeerId) -> (u64, String, String) {
         let mut state = self.state.write();
 
@@ -266,6 +314,7 @@ impl LeaderElection {
         (term, lid, aid)
     }
 
+    /// Enable or disable automatic election timers.
     pub fn enable_auto_election(&self, enable: bool) {
         let mut state = self.state.write();
         state.auto_election_enabled = enable;
@@ -274,6 +323,8 @@ impl LeaderElection {
         }
     }
 
+    /// Notify the election module that a peer has left, which may
+    /// influence quorum counting.
     pub fn handle_peer_left(&self, peer_id: &PeerId) {
         let state = self.state.read();
         if state.leader_id.as_ref() == Some(peer_id) {
@@ -288,6 +339,9 @@ impl LeaderElection {
         }
     }
 
+    /// Consume any pending membership events and update the
+    /// connected peer count accordingly. Should be called periodically
+    /// by an external driver.
     pub fn drain_membership_events(&self, connected_peer_count: &mut usize) {
         let mut rx = self.membership_rx.lock();
         loop {

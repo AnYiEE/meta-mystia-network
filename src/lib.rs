@@ -1,3 +1,8 @@
+//! Core implementation of the MetaMystia peer‑to‑peer networking
+//! stack. Exposes an FFI layer for C clients as well as a rich set
+//! of internal Rust components for transport, discovery, membership,
+//! leader election, and message routing.
+
 mod callback;
 mod config;
 mod discovery;
@@ -34,20 +39,39 @@ use crate::session_router::SessionRouter;
 use crate::transport::TransportManager;
 use crate::types::{PeerId, PeerStatus};
 
+/// Holds all high‑level components that comprise a running
+/// network node. This struct is wrapped in an `Arc` and stored in
+/// the global FFI state during initialization.
+///
+/// Fields are grouped into transport, membership/election,
+/// routing/discovery, callbacks, lifecycle and identity/config.
 pub struct NetworkState {
+    // --- core managers ---------------------------------------------------
     pub transport: Arc<TransportManager>,
     pub membership: Arc<MembershipManager>,
     pub leader_election: Arc<LeaderElection>,
     pub session_router: Arc<SessionRouter>,
     pub discovery: Option<DiscoveryManager>,
+
+    // --- callback bridge -------------------------------------------------
     pub callback: Arc<CallbackManager>,
+
+    // --- lifecycle control -----------------------------------------------
     pub shutdown_token: CancellationToken,
+
+    // --- identity & configuration ----------------------------------------
     pub local_peer_id: PeerId,
     pub session_id: String,
     pub config: NetworkConfig,
 }
 
 impl NetworkState {
+    /// Initialize all networking components for a node given the
+    /// textual peer ID, session identifier, and configuration.
+    ///
+    /// This includes constructing transport, membership, leader
+    /// election, session routing, discovery (mDNS), and callback
+    /// handling. Returns an error if any subsystem fails to start.
     pub async fn new(
         peer_id: String,
         session_id: String,
@@ -159,6 +183,9 @@ impl NetworkState {
         })
     }
 
+    /// Gracefully shut down the network state, broadcasting a
+    /// leave message, draining send queues, cancelling background
+    /// tasks, and tearing down discovery and callback threads.
     pub async fn shutdown(self) {
         self.transport.broadcast_peer_leave();
         self.transport
@@ -178,6 +205,8 @@ impl NetworkState {
     }
 }
 
+// Context passed into the message handling task. Bundles all
+// the managers and identifiers needed to process incoming packets.
 struct MessageHandlerCtx {
     transport: Arc<TransportManager>,
     membership: Arc<MembershipManager>,
@@ -187,6 +216,10 @@ struct MessageHandlerCtx {
     local_peer_id: PeerId,
 }
 
+/// Spawn a background task responsible for draining the transport
+/// `incoming_rx` channel and dispatching each packet to
+/// `handle_message`. This isolates the network I/O from the rest of
+/// the application logic.
 fn spawn_message_handler(
     mut incoming_rx: mpsc::Receiver<(PeerId, RawPacket)>,
     ctx: MessageHandlerCtx,
@@ -205,6 +238,9 @@ fn spawn_message_handler(
     });
 }
 
+/// Core packet processing logic. Differentiates between
+/// internal protocol messages and user payloads, updating membership
+/// state, leader election, routing, and callbacks as appropriate.
 async fn handle_message(peer_id: &PeerId, packet: RawPacket, ctx: &MessageHandlerCtx) {
     let MessageHandlerCtx {
         transport,
@@ -361,12 +397,7 @@ async fn handle_message(peer_id: &PeerId, packet: RawPacket, ctx: &MessageHandle
                     let from = PeerId::new(&from_peer_id);
                     let data = decode_payload(&user_packet)
                         .unwrap_or_else(|_| user_packet.payload.clone());
-                    callback.send_message_received(
-                        &from,
-                        data,
-                        user_packet.msg_type,
-                        user_packet.flags,
-                    );
+                    callback.send_received(&from, data, user_packet.msg_type, user_packet.flags);
                 }
             }
         }
@@ -378,10 +409,14 @@ async fn handle_message(peer_id: &PeerId, packet: RawPacket, ctx: &MessageHandle
                 return;
             }
         };
-        callback.send_message_received(peer_id, data, packet.msg_type, packet.flags);
+        callback.send_received(peer_id, data, packet.msg_type, packet.flags);
     }
 }
 
+/// Launch timers for periodic background work:
+/// - ping/peer timeout checks
+/// - leader heartbeat forwarding
+/// - election timeouts
 fn spawn_periodic_tasks(
     transport: Arc<TransportManager>,
     membership: Arc<MembershipManager>,
@@ -495,6 +530,9 @@ fn spawn_periodic_tasks(
     }
 }
 
+/// Watch for leader change notifications coming from the
+/// `LeaderElection` component and forward them to the callback
+/// manager.
 fn spawn_leader_change_watcher(
     mut leader_rx: mpsc::Receiver<Option<PeerId>>,
     callback: Arc<CallbackManager>,
@@ -517,6 +555,8 @@ fn spawn_leader_change_watcher(
     });
 }
 
+/// Listen to membership events (join/leave/status) and turn them
+/// into peer-status callbacks for the FFI layer.
 fn spawn_membership_event_watcher(
     mut event_rx: tokio::sync::broadcast::Receiver<MembershipEvent>,
     callback: Arc<CallbackManager>,
@@ -1203,7 +1243,7 @@ mod tests {
         cb.register_receive_callback(Some(on_receive));
 
         RECEIVE_COUNT.store(0, Ordering::Relaxed);
-        cb.send_message_received(
+        cb.send_received(
             &PeerId::new("test_peer"),
             bytes::Bytes::from_static(b"hello"),
             0x0100,

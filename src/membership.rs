@@ -1,3 +1,6 @@
+//! Membership manager maintains peer state and broadcasts events
+//! when the set of known peers changes.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,6 +13,9 @@ use crate::config::NetworkConfig;
 use crate::error::NetworkError;
 use crate::types::{PeerId, PeerInfo, PeerStatus};
 
+/// Events emitted by `MembershipManager` whenever the peer list
+/// changes. Other components (leader election, callbacks) subscribe
+/// to the broadcast channel.
 #[derive(Clone, Debug)]
 pub enum MembershipEvent {
     Joined(PeerId),
@@ -21,14 +27,27 @@ pub enum MembershipEvent {
     },
 }
 
+/// Maintains the list of known peers, their connection status,
+/// and associated metadata. Thread-safe APIs allow other tasks to
+/// query or update information without blocking.
 pub struct MembershipManager {
+    // identity of this node
     local_peer_id: PeerId,
+
+    // protected map from PeerId -> PeerInfo
     peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
+
+    // configuration parameters used during timeouts and other checks
     config: NetworkConfig,
+
+    // broadcast sender for membership events
     pub event_tx: broadcast::Sender<MembershipEvent>,
 }
 
 impl MembershipManager {
+    /// Create a fresh `MembershipManager` for the given local peer
+    /// and configuration. The internal peer list starts empty, and
+    /// a broadcast channel is created for membership events.
     pub fn new(local_peer_id: PeerId, config: NetworkConfig) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
@@ -39,10 +58,13 @@ impl MembershipManager {
         }
     }
 
+    /// Return the identifier assigned to this node.
     pub fn local_peer_id(&self) -> &PeerId {
         &self.local_peer_id
     }
 
+    /// Add a new peer to the membership table. Returns an error if a
+    /// peer with the same ID already exists.
     pub fn add_peer(&self, peer_id: PeerId, addr: SocketAddr) -> Result<(), NetworkError> {
         let mut peers = self.peers.write();
         if peers.contains_key(&peer_id) {
@@ -56,6 +78,8 @@ impl MembershipManager {
         Ok(())
     }
 
+    /// Remove a peer from the table, signalling a `Left` event if the
+    /// peer was present.
     pub fn remove_peer(&self, peer_id: &PeerId) {
         let removed = self.peers.write().remove(peer_id).is_some();
         if removed {
@@ -63,6 +87,8 @@ impl MembershipManager {
         }
     }
 
+    /// Update the status of an existing peer, emitting a
+    /// `StatusChanged` event if the value actually changed.
     pub fn update_status(&self, peer_id: &PeerId, new_status: PeerStatus) {
         let mut peers = self.peers.write();
         if let Some(info) = peers.get_mut(peer_id) {
@@ -79,14 +105,17 @@ impl MembershipManager {
         }
     }
 
+    /// Check whether the given peer ID is known to the manager.
     pub fn has_peer(&self, peer_id: &PeerId) -> bool {
         self.peers.read().contains_key(peer_id)
     }
 
+    /// Return a snapshot list of all peers currently tracked.
     pub fn get_peer_list(&self) -> Vec<PeerInfo> {
         self.peers.read().values().cloned().collect()
     }
 
+    /// Return a list of peer IDs currently marked `Connected`.
     pub fn get_connected_peers(&self) -> Vec<PeerId> {
         self.peers
             .read()
@@ -96,14 +125,17 @@ impl MembershipManager {
             .collect()
     }
 
+    /// Get the last measured round‑trip time for a peer, if any.
     pub fn get_peer_rtt(&self, peer_id: &PeerId) -> Option<u32> {
         self.peers.read().get(peer_id).and_then(|info| info.rtt_ms)
     }
 
+    /// Retrieve the current status of a peer, if known.
     pub fn get_peer_status(&self, peer_id: &PeerId) -> Option<PeerStatus> {
         self.peers.read().get(peer_id).map(|info| info.status)
     }
 
+    /// Return number of peers currently marked `Connected`.
     pub fn get_connected_peer_count(&self) -> usize {
         self.peers
             .read()
@@ -112,6 +144,7 @@ impl MembershipManager {
             .count()
     }
 
+    /// Update RTT and last-seen timestamp when a Pong arrives.
     pub fn handle_pong(&self, peer_id: &PeerId, sent_timestamp_ms: u64) {
         let now = current_timestamp_ms();
         let rtt = now.saturating_sub(sent_timestamp_ms) as u32;
@@ -122,6 +155,7 @@ impl MembershipManager {
         }
     }
 
+    /// Refresh only the last-seen timestamp for the given peer.
     pub fn update_last_seen(&self, peer_id: &PeerId) {
         let mut peers = self.peers.write();
         if let Some(info) = peers.get_mut(peer_id) {
@@ -129,6 +163,8 @@ impl MembershipManager {
         }
     }
 
+    /// Return list of peers whose last-seen exceeded the calculated
+    /// timeout (heartbeat interval * multiplier). Useful for cleanup.
     pub fn check_timeouts(&self) -> Vec<PeerId> {
         let timeout_ms =
             self.config.heartbeat_interval_ms * self.config.heartbeat_timeout_multiplier as u64;
@@ -136,6 +172,7 @@ impl MembershipManager {
         let now = Instant::now();
 
         let peers = self.peers.read();
+
         peers
             .iter()
             .filter(|(_, info)| {
@@ -146,6 +183,8 @@ impl MembershipManager {
     }
 }
 
+/// Helper returning the current system time in milliseconds since
+/// the UNIX epoch. Used for RTT calculations and heartbeat timestamps.
 pub fn current_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

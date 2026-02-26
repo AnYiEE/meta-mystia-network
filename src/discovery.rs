@@ -1,3 +1,7 @@
+//! Multicast DNS (mDNS) based peer discovery. Advertises the
+//! local node on the LAN and attempts to connect to other peers that
+//! match the same session.
+
 use std::sync::Arc;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -11,14 +15,27 @@ use crate::types::PeerId;
 
 const SERVICE_TYPE: &str = "_meta-mystia._tcp.local.";
 
+/// Responsible for advertising the local node via mDNS and
+/// discovering other peers on the same LAN session. Uses
+/// `mdns_sd` crate to register a service and browse for peers.
+///
+/// Fields are grouped: mDNS state, identity, network helpers,
+/// and shutdown control.
 pub struct DiscoveryManager {
+    // --- mDNS internal state ---------------------------------------------
     daemon: ServiceDaemon,
+
+    // --- identity information --------------------------------------------
     local_peer_id: PeerId,
     session_id: String,
-    instance_name: String,
+    instance_name: String, // derived from session + peer
     listen_port: u16,
+
+    // --- references to other subsystems ----------------------------------
     membership: Arc<MembershipManager>,
     transport: Arc<TransportManager>,
+
+    // --- shutdown control ------------------------------------------------
     shutdown_token: CancellationToken,
 }
 
@@ -48,22 +65,26 @@ impl DiscoveryManager {
         })
     }
 
+    /// Begin mDNS service advertisement and start browsing for peers.
+    /// Returns an error if registering the local service fails.
     pub fn start(&self) -> Result<(), NetworkError> {
         self.register_service()?;
         self.start_browse();
         Ok(())
     }
 
+    /// Create and register the local mDNS service using our peer
+    /// ID, session, and protocol version as properties.
     fn register_service(&self) -> Result<(), NetworkError> {
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown".into());
 
-        let version_str = PROTOCOL_VERSION.to_string();
+        let protocol_version = PROTOCOL_VERSION.to_string();
         let properties = [
             ("peer_id", self.local_peer_id.as_str()),
             ("session_id", self.session_id.as_str()),
-            ("protocol_version", version_str.as_str()),
+            ("protocol_version", protocol_version.as_str()),
         ];
 
         let service = ServiceInfo::new(
@@ -90,6 +111,9 @@ impl DiscoveryManager {
         Ok(())
     }
 
+    /// Spawn a task that listens for incoming mDNS service events and
+    /// initiates TCP connections to discovered peers that pass the
+    /// filtering rules.
     fn start_browse(&self) {
         let receiver = match self.daemon.browse(SERVICE_TYPE) {
             Ok(r) => r,
@@ -163,6 +187,7 @@ impl DiscoveryManager {
         });
     }
 
+    /// Tear down the mDNS advertisement and stop the daemon.
     pub fn shutdown(&self) {
         if let Err(e) = self
             .daemon
@@ -176,6 +201,8 @@ impl DiscoveryManager {
         tracing::info!("mDNS discovery shutdown");
     }
 
+    /// Placeholder for future support of centralized discovery
+    /// servers. Currently unimplemented.
     pub fn connect_to_discovery_server(_server_addr: &str) -> Result<(), NetworkError> {
         Err(NetworkError::NotImplemented)
     }
@@ -185,7 +212,7 @@ impl DiscoveryManager {
     /// - `discovered_session` matches our session
     /// - `discovered_peer` is not ourselves
     /// - `discovered_peer` is not already connected
-    /// - Lexicographic dedup: we only connect if `local_peer_id < discovered_peer`
+    /// - Lexicographic dedup: we only connect if `local_peer_id < discovered_peer`.
     pub fn should_connect_to_discovered_peer(
         local_peer_id: &PeerId,
         local_session_id: &str,

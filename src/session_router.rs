@@ -1,3 +1,7 @@
+//! Routes user data messages according to the current topology and
+//! centralized/leader mode. Provides operations for broadcasting,
+//! targeted sends, and leader-forwarding.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -9,16 +13,31 @@ use crate::protocol::{InternalMessage, msg_types};
 use crate::transport::TransportManager;
 use crate::types::{ForwardTarget, MessageTarget, PeerId};
 
+/// Routes user messages through the network. Handles
+/// different delivery targets (broadcast, peer, leader) and
+/// automatically forwards traffic in centralized mode.
+///
+/// Fields are ordered: identity, dependencies, configuration
+/// state (atomics) used at runtime.
 pub struct SessionRouter {
+    // identity of this node
     local_peer_id: PeerId,
+
+    // dependencies on other managers
     transport: Arc<TransportManager>,
     leader_election: Arc<LeaderElection>,
-    centralized_mode: AtomicBool,
-    centralized_auto_forward: AtomicBool,
-    compression_threshold: AtomicU32,
+
+    // runtime configuration/state stored atomically for
+    // lock‑free modification by other threads
+    centralized_mode: AtomicBool, // true when operating under leader
+    centralized_auto_forward: AtomicBool, // leader behavior toggle
+    compression_threshold: AtomicU32, // size at which packets compress
 }
 
 impl SessionRouter {
+    /// Construct a new router. Initial behavior (auto-forward
+    /// and compression threshold) is taken from the provided
+    /// `NetworkConfig`.
     pub fn new(
         local_peer_id: PeerId,
         transport: Arc<TransportManager>,
@@ -37,23 +56,34 @@ impl SessionRouter {
         }
     }
 
+    // --- configuration accessors -----------------------------------------
+
+    /// Is the network currently operating in centralized (leader‑based)
+    /// mode? Only the leader may send broadcast messages directly.
     pub fn is_centralized(&self) -> bool {
         self.centralized_mode.load(Ordering::Relaxed)
     }
 
+    /// Enable or disable centralized (leader‑based) operation mode.
+    /// Only leaders should set this to `true` when elected.
     pub fn set_centralized(&self, enable: bool) {
         self.centralized_mode.store(enable, Ordering::Relaxed);
     }
 
+    /// Leader-specific setting: when true, a leader receiving a
+    /// broadcast will re-broadcast it to all followers.
     pub fn is_auto_forward(&self) -> bool {
         self.centralized_auto_forward.load(Ordering::Relaxed)
     }
 
+    /// Toggle the leader behavior that automatically re‑broadcasts
+    /// a received broadcast message to all followers.
     pub fn set_auto_forward(&self, enable: bool) {
         self.centralized_auto_forward
             .store(enable, Ordering::Relaxed);
     }
 
+    /// Packet size beyond which LZ4 compression will be attempted.
     pub fn set_compression_threshold(&self, threshold: u32) {
         self.compression_threshold
             .store(threshold, Ordering::Relaxed);
@@ -62,6 +92,8 @@ impl SessionRouter {
     pub fn compression_threshold(&self) -> u32 {
         self.compression_threshold.load(Ordering::Relaxed)
     }
+
+    // --- convenience helpers ---------------------------------------------
 
     fn is_leader(&self) -> bool {
         self.leader_election.is_leader()
@@ -140,6 +172,7 @@ impl SessionRouter {
         let clean_flags = user_flags & 0xFE;
         let packet = encode_packet(msg_type, data, clean_flags, self.compression_threshold())?;
         self.transport.broadcast(packet, None);
+
         Ok(())
     }
 

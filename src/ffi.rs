@@ -1,3 +1,9 @@
+//! FFI boundary exposing a C-compatible API for the network library.
+//!
+//! Each exported function is wrapped in `catch_unwind` to prevent
+//! Rust panics from crossing the language boundary. Errors are
+//! reported via `GetLastErrorCode`/`GetLastErrorMessage`.
+
 use std::ffi::{CStr, CString, c_char};
 use std::panic::catch_unwind;
 use std::sync::Arc;
@@ -16,19 +22,34 @@ use crate::messaging::encode_internal;
 use crate::protocol::InternalMessage;
 use crate::types::{ForwardTarget, MessageTarget, PeerId};
 
+// --- globals ---------------------------------------------------------
+// The Tokio runtime used to drive async components. Created during
+// initialization and torn down during shutdown.
 static RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
+
+// Singleton network state exposed to FFI callers.
 static NETWORK: Mutex<Option<NetworkState>> = Mutex::new(None);
+
+// Last error code/message pair recorded by any FFI entrypoint. The
+// C consumer can retrieve these after a failure.
 static LAST_ERROR: Mutex<Option<(i32, String)>> = Mutex::new(None);
+
+// Storage for a string returned to C; kept alive until the next call.
 static LAST_RETURNED_STRING: Mutex<Option<CString>> = Mutex::new(None);
 
+/// Record an error code and human-readable message for later
+/// retrieval from the FFI layer.
 fn set_error(code: i32, msg: impl Into<String>) {
     *LAST_ERROR.lock() = Some((code, msg.into()));
 }
 
-fn set_network_error(err: &NetworkError) {
-    set_error(err.error_code(), err.to_string());
+fn set_network_error(e: &NetworkError) {
+    set_error(e.error_code(), e.to_string());
 }
 
+/// Convert a Rust `String` into a C pointer that remains valid
+/// until the next call that returns a string. Handles embedded NUL
+/// bytes by logging and returning an empty string.
 fn return_string(s: String) -> *const c_char {
     let c_string = match CString::new(s) {
         Ok(c) => c,
@@ -64,30 +85,42 @@ where
 }
 
 #[repr(C)]
+/// C-compatible layout for network configuration. Field order mirrors
+/// the Rust `NetworkConfig` and groups timing, sizing and feature
+/// toggle parameters together. `_padding` ensures 32‑bit alignment.
 pub struct NetworkConfigFFI {
+    // heartbeat/election timing
     pub heartbeat_interval_ms: u64,
     pub election_timeout_min_ms: u64,
     pub election_timeout_max_ms: u64,
+    pub heartbeat_timeout_multiplier: u32,
+
+    // reconnection/backoff timing
     pub reconnect_initial_ms: u64,
     pub reconnect_max_ms: u64,
+
+    // payload and queue sizes
     pub compression_threshold: u32,
-    pub heartbeat_timeout_multiplier: u32,
     pub send_queue_capacity: u32,
+
+    // feature toggles (use 0/1)
     pub centralized_auto_forward: u8,
     pub auto_election_enabled: u8,
+
+    // pad to multiple of 4 bytes
     pub _padding: [u8; 2],
 }
 
 impl From<&NetworkConfigFFI> for NetworkConfig {
     fn from(ffi: &NetworkConfigFFI) -> Self {
         Self {
-            compression_threshold: ffi.compression_threshold,
             heartbeat_interval_ms: ffi.heartbeat_interval_ms,
             election_timeout_min_ms: ffi.election_timeout_min_ms,
             election_timeout_max_ms: ffi.election_timeout_max_ms,
             heartbeat_timeout_multiplier: ffi.heartbeat_timeout_multiplier,
             reconnect_initial_ms: ffi.reconnect_initial_ms,
             reconnect_max_ms: ffi.reconnect_max_ms,
+            compression_threshold: ffi.compression_threshold,
             send_queue_capacity: ffi.send_queue_capacity as usize,
             centralized_auto_forward: ffi.centralized_auto_forward != 0,
             auto_election_enabled: ffi.auto_election_enabled != 0,
@@ -95,6 +128,8 @@ impl From<&NetworkConfigFFI> for NetworkConfig {
     }
 }
 
+/// Initialize the network stack with the given peer and session IDs.
+/// Returns 0 (`error_codes::OK`) on success or an error code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn InitializeNetwork(peer_id: *const c_char, session_id: *const c_char) -> i32 {
     catch_unwind(|| initialize_network_inner(peer_id, session_id, None)).unwrap_or_else(|_| {
@@ -182,6 +217,8 @@ fn initialize_network_inner(
     error_codes::OK
 }
 
+/// Cleanly shut down the network, cancelling the runtime and
+/// releasing resources. Safe to call multiple times.
 #[unsafe(no_mangle)]
 pub extern "C" fn ShutdownNetwork() -> i32 {
     catch_unwind(|| {
@@ -210,6 +247,9 @@ pub extern "C" fn ShutdownNetwork() -> i32 {
     })
 }
 
+/// Query whether `InitializeNetwork` has been called successfully.
+/// Returns 1 if initialized, 0 otherwise.
+// --- state query --------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "C" fn IsNetworkInitialized() -> u8 {
     catch_unwind(|| u8::from(NETWORK.lock().is_some())).unwrap_or(0)
@@ -240,6 +280,7 @@ pub extern "C" fn GetLastErrorMessage() -> *const c_char {
     .unwrap_or(std::ptr::null())
 }
 
+// --- peer connection APIs -----------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "C" fn ConnectToPeer(addr: *const c_char) -> i32 {
     catch_unwind(|| {
@@ -637,6 +678,7 @@ pub extern "C" fn BroadcastMessage(data: *const u8, length: i32, msg_type: u16, 
     })
 }
 
+// --- messaging APIs -----------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "C" fn SendToPeer(
     target: *const c_char,
@@ -809,6 +851,7 @@ pub extern "C" fn ForwardMessage(
     })
 }
 
+// --- callback registration ----------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "C" fn RegisterReceiveCallback(callback: Option<ReceiveCallback>) -> i32 {
     catch_unwind(|| {
@@ -907,6 +950,7 @@ pub extern "C" fn RegisterConnectionResultCallback(
     })
 }
 
+// --- utility ------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "C" fn EnableLogging(enable: u8) -> i32 {
     catch_unwind(|| {

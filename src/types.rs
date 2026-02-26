@@ -1,17 +1,26 @@
+//! Basic type definitions used throughout the network stack,
+//! including peer identifiers, status enums, and routing targets.
+
 use std::fmt;
 use std::net::SocketAddr;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+/// Unique identifier for a peer. Wrapping a `String` allows
+/// strong typing rather than using raw strings everywhere.
+///
+/// Provides convenience conversions and display formatting.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct PeerId(String);
 
 impl PeerId {
+    /// Create a new `PeerId` from any type convertible to `String`.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// Borrow the underlying string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -41,6 +50,8 @@ impl AsRef<str> for PeerId {
     }
 }
 
+/// Current state of a peer connection used by membership manager
+/// and exported through callbacks.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum PeerStatus {
     Connected,
@@ -50,6 +61,8 @@ pub enum PeerStatus {
 }
 
 impl PeerStatus {
+    /// Convert the status to an integer suitable for FFI callbacks
+    /// or external consumers.
     pub fn as_i32(self) -> i32 {
         match self {
             Self::Connected => 0,
@@ -60,18 +73,28 @@ impl PeerStatus {
     }
 }
 
+/// Detailed information we keep about each known peer in the
+/// membership table.
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
+    // identity
     pub peer_id: PeerId,
     pub addr: SocketAddr,
+
+    // runtime state
     pub status: PeerStatus,
     pub last_seen: Instant,
     pub rtt_ms: Option<u32>,
     pub connected_at: Instant,
+
+    // configuration
     pub should_reconnect: bool,
 }
 
 impl PeerInfo {
+    /// Construct a `PeerInfo` record for a freshly connected peer.
+    /// Fields such as `last_seen` and `connected_at` are initialized
+    /// to the current instant, and the default status is `Connected`.
     pub fn new(peer_id: PeerId, addr: SocketAddr) -> Self {
         let now = Instant::now();
         Self {
@@ -86,6 +109,8 @@ impl PeerInfo {
     }
 }
 
+/// Destination of a user message when routing through the session
+/// layer; used by `SessionRouter`.
 #[derive(Clone, Debug)]
 pub enum MessageTarget {
     Broadcast,
@@ -93,6 +118,7 @@ pub enum MessageTarget {
     ToLeader,
 }
 
+/// Where a forwarded message should be sent by the leader.
 #[derive(Clone, Debug)]
 pub enum ForwardTarget {
     ToPeer(PeerId),

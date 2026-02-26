@@ -1,3 +1,7 @@
+//! Low-level TCP transport manager. Handles connection
+//! establishment, framing/de-framing of packets, keepalive,
+//! and reconnection/backoff logic.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,6 +23,10 @@ use crate::messaging::{RawPacket, decode_internal, encode_internal};
 use crate::protocol::InternalMessage;
 use crate::types::{PeerId, PeerInfo, PeerStatus};
 
+/// Codec used by `tokio_util::codec::Framed` to frame and
+/// de-frame `RawPacket`s. Each encoded packet consists of a 7-byte
+/// header (length, msg_type, flags) followed by the payload bytes.
+/// The codec also enforces a maximum size.
 pub struct PacketCodec {
     max_message_size: u32,
 }
@@ -76,23 +84,43 @@ impl Encoder<RawPacket> for PacketCodec {
     }
 }
 
+/// Internal state for an active connection to a peer. Stored in
+/// the `TransportManager::connections` map.
 struct PeerConnection {
-    send_tx: mpsc::Sender<RawPacket>,
-    cancel_token: CancellationToken,
-    info: PeerInfo,
+    send_tx: mpsc::Sender<RawPacket>, // channel for outbound packets
+    cancel_token: CancellationToken,  // used to shut down reader/writer tasks
+    info: PeerInfo,                   // metadata about the peer
 }
 
+/// Manages TCP connections to peers. Responsible for accepting
+/// incoming peers, initiating outbound connections, and shuttling
+/// packets to/from the rest of the system.
+///
+/// Fields are grouped for clarity: identity, configuration,
+/// connection state, endpoints, and shutdown control.
 pub struct TransportManager {
+    // --- identity --------------------------------------------------------
     local_peer_id: PeerId,
     session_id: String,
+
+    // --- configuration ---------------------------------------------------
     config: NetworkConfig,
+
+    // --- active connections map ------------------------------------------
     connections: Arc<RwLock<HashMap<PeerId, PeerConnection>>>,
+
+    // --- network endpoints -----------------------------------------------
     listener_addr: SocketAddr,
     incoming_tx: mpsc::Sender<(PeerId, RawPacket)>,
+
+    // --- lifecycle control -----------------------------------------------
     shutdown_token: CancellationToken,
 }
 
 impl TransportManager {
+    /// Create a new transport manager and begin listening on a
+    /// randomly assigned TCP port. Returns the manager and a receiver
+    /// for incoming `(PeerId, RawPacket)` tuples.
     pub async fn new(
         local_peer_id: PeerId,
         session_id: String,
@@ -123,22 +151,29 @@ impl TransportManager {
         Ok((manager, incoming_rx))
     }
 
+    /// Address the TCP listener is bound to.
     pub fn listener_addr(&self) -> SocketAddr {
         self.listener_addr
     }
 
+    /// Local identifier of this node.
     pub fn local_peer_id(&self) -> &PeerId {
         &self.local_peer_id
     }
 
+    /// Session identifier shared by all peers in the network.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
+    /// Number of currently tracked connections.
     pub fn connection_count(&self) -> usize {
         self.connections.read().len()
     }
 
+    /// Task run by `new()` that accepts inbound TCP sockets and
+    /// spawns a handler for each. Respects the shutdown token and
+    /// honour the `MAX_CONNECTIONS` limit.
     async fn accept_loop(self: &Arc<Self>, listener: TcpListener) {
         loop {
             tokio::select! {
@@ -166,6 +201,9 @@ impl TransportManager {
         }
     }
 
+    /// Apply platform-specific TCP keepalive settings to a stream.
+    /// Used for both incoming and outgoing connections to detect
+    /// dead peers.
     fn configure_keepalive(stream: &TcpStream) -> Result<(), NetworkError> {
         use socket2::SockRef;
 
@@ -182,6 +220,9 @@ impl TransportManager {
         Ok(())
     }
 
+    /// Perform handshake on a newly accepted connection, then
+    /// register it and start reader/writer tasks. Returns an error if
+    /// handshake fails (including version/session mismatch).
     async fn handle_incoming_connection(
         self: &Arc<Self>,
         stream: TcpStream,
@@ -212,6 +253,11 @@ impl TransportManager {
         }
     }
 
+    /// Read and validate a `Handshake` message from the peer,
+    /// replying with a corresponding `HandshakeAck`. On success
+    /// returns the remote `PeerId`, its listen port, and a packet
+    /// that should be broadcast to notify other modules of the new
+    /// connection.
     async fn receive_handshake(
         &self,
         framed: &mut Framed<TcpStream, PacketCodec>,
@@ -304,6 +350,9 @@ impl TransportManager {
         }
     }
 
+    /// Establish an outbound TCP connection to the given address and
+    /// perform the handshake protocol. On success the new peer's
+    /// `PeerId` is returned and the connection is registered.
     pub async fn connect_to(self: &Arc<Self>, addr: &str) -> Result<PeerId, NetworkError> {
         if self.connections.read().len() >= MAX_CONNECTIONS {
             return Err(NetworkError::MaxConnectionsReached);
@@ -357,6 +406,9 @@ impl TransportManager {
         }
     }
 
+    /// Wait for and process a handshake acknowledgement from a peer.
+    /// Returns the remote `PeerId`, its reported listen port and a
+    /// packet mirroring the ack for notification purposes.
     async fn receive_handshake_ack(
         &self,
         framed: &mut Framed<TcpStream, PacketCodec>,
@@ -396,6 +448,11 @@ impl TransportManager {
         }
     }
 
+    /// Add a newly established, handshake connection to the
+    /// internal map and spawn the read/write tasks that keep the
+    /// socket alive and feed incoming packets back to the network
+    /// state. Also handles cleanup and reconnection logic when the
+    /// socket closes.
     fn register_connection(
         self: &Arc<Self>,
         peer_id: PeerId,
@@ -499,6 +556,10 @@ impl TransportManager {
         Ok(())
     }
 
+    /// When a connection is lost but flagged for reconnection, this
+    /// method kicks off a background task that attempts to re-establish
+    /// the connection using exponential backoff until success or
+    /// shutdown.
     fn spawn_reconnect(self: &Arc<Self>, peer_id: PeerId, addr: String) {
         let mgr = Arc::clone(self);
         let initial_ms = self.config.reconnect_initial_ms;
@@ -534,6 +595,8 @@ impl TransportManager {
         });
     }
 
+    /// Enqueue a packet to be sent to a specific peer. Returns an
+    /// error if the peer is unknown or the send queue is full/closed.
     pub fn send_to_peer(&self, peer_id: &PeerId, packet: RawPacket) -> Result<(), NetworkError> {
         let conns = self.connections.read();
         let conn = conns
@@ -548,6 +611,9 @@ impl TransportManager {
         })
     }
 
+    /// Send the same packet to all connected peers, optionally
+    /// excluding a list. Returns a list of peers that failed to
+    /// receive the packet along with the error.
     pub fn broadcast(
         &self,
         packet: RawPacket,
@@ -581,6 +647,9 @@ impl TransportManager {
         errors
     }
 
+    /// Gracefully disconnect from a peer, sending a `PeerLeave`
+    /// message and cancelling its tasks. The peer is removed from
+    /// the internal map but may reconnect if allowed.
     pub fn disconnect_peer(&self, peer_id: &PeerId) -> Result<(), NetworkError> {
         let leave_msg = encode_internal(&InternalMessage::PeerLeave {
             peer_id: self.local_peer_id.as_str().to_owned(),
@@ -600,6 +669,8 @@ impl TransportManager {
         Ok(())
     }
 
+    /// Broadcast a `PeerLeave` internal message to all connected
+    /// peers, used during shutdown.
     pub fn broadcast_peer_leave(&self) {
         match encode_internal(&InternalMessage::PeerLeave {
             peer_id: self.local_peer_id.as_str().to_owned(),
@@ -629,6 +700,8 @@ impl TransportManager {
         }
     }
 
+    /// Immediately terminate all connections and prevent
+    /// reconnection. Called during network shutdown.
     pub fn shutdown(&self) {
         let mut conns = self.connections.write();
         for conn in conns.values_mut() {
@@ -648,6 +721,8 @@ impl TransportManager {
             .collect()
     }
 
+    /// Return a list of peer ids whose connections are currently
+    /// marked as connected.
     pub fn get_connected_peer_ids(&self) -> Vec<PeerId> {
         self.connections
             .read()
@@ -657,28 +732,37 @@ impl TransportManager {
             .collect()
     }
 
+    /// Check whether a connection entry exists for the given peer.
     pub fn has_peer(&self, peer_id: &PeerId) -> bool {
         self.connections.read().contains_key(peer_id)
     }
 
+    /// Control whether the manager should attempt to reconnect to a
+    /// peer after its connection is lost.
     pub fn set_should_reconnect(&self, peer_id: &PeerId, should_reconnect: bool) {
         if let Some(conn) = self.connections.write().get_mut(peer_id) {
             conn.info.should_reconnect = should_reconnect;
         }
     }
 
+    /// Update the stored status of a peer connection (e.g.
+    /// Connected/Disconnected).
     pub fn update_peer_status(&self, peer_id: &PeerId, status: PeerStatus) {
         if let Some(conn) = self.connections.write().get_mut(peer_id) {
             conn.info.status = status;
         }
     }
 
+    /// Touch the last-seen timestamp for a peer, used by
+    /// membership/timeout logic.
     pub fn update_last_seen(&self, peer_id: &PeerId) {
         if let Some(conn) = self.connections.write().get_mut(peer_id) {
             conn.info.last_seen = std::time::Instant::now();
         }
     }
 
+    /// Record a measured round-trip time for a peer and update last
+    /// seen time.
     pub fn update_rtt(&self, peer_id: &PeerId, rtt_ms: u32) {
         if let Some(conn) = self.connections.write().get_mut(peer_id) {
             conn.info.rtt_ms = Some(rtt_ms);
@@ -686,6 +770,7 @@ impl TransportManager {
         }
     }
 
+    /// Retrieve the last known RTT for the specified peer, if any.
     pub fn get_peer_rtt(&self, peer_id: &PeerId) -> Option<u32> {
         self.connections
             .read()
@@ -693,10 +778,12 @@ impl TransportManager {
             .and_then(|c| c.info.rtt_ms)
     }
 
+    /// Get the stored connection status of a peer.
     pub fn get_peer_status(&self, peer_id: &PeerId) -> Option<PeerStatus> {
         self.connections.read().get(peer_id).map(|c| c.info.status)
     }
 
+    /// Return the last-known socket address for the peer.
     pub fn get_peer_addr(&self, peer_id: &PeerId) -> Option<SocketAddr> {
         self.connections.read().get(peer_id).map(|c| c.info.addr)
     }

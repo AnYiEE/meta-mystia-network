@@ -1,3 +1,6 @@
+//! Callback management for notifying C clients about network events.
+//! Provides thread‑safe registration and asynchronous dispatch.
+
 use std::ffi::{CString, c_char};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,18 +11,25 @@ use tokio::sync::mpsc;
 
 use crate::types::PeerId;
 
-pub type ReceiveCallback = unsafe extern "C" fn(*const c_char, *const u8, i32, u16, u8);
+// Function pointer types exposed to the C side via FFI.
+// These are all `unsafe extern "C"` because we call them
+// across the language boundary.
+pub type ConnectionResultCallback = unsafe extern "C" fn(*const c_char, u8, i32);
 pub type LeaderChangedCallback = unsafe extern "C" fn(*const c_char);
 pub type PeerStatusCallback = unsafe extern "C" fn(*const c_char, i32);
-pub type ConnectionResultCallback = unsafe extern "C" fn(*const c_char, u8, i32);
+pub type ReceiveCallback = unsafe extern "C" fn(*const c_char, *const u8, i32, u16, u8);
 
+/// Internal events that can be emitted by the Rust code and
+/// forwarded to the registered callbacks.
+///
+/// Each variant carries the data necessary to perform the FFI
+/// call later on the callback thread.
 #[derive(Debug)]
 pub enum CallbackEvent {
-    MessageReceived {
-        peer_id: String,
-        data: Bytes,
-        msg_type: u16,
-        flags: u8,
+    ConnectionResult {
+        addr: String,
+        success: bool,
+        error_code: i32,
     },
     LeaderChanged {
         leader_id: Option<String>,
@@ -28,68 +38,90 @@ pub enum CallbackEvent {
         peer_id: String,
         status: i32,
     },
-    ConnectionResult {
-        addr: String,
-        success: bool,
-        error_code: i32,
+    Received {
+        peer_id: String,
+        data: Bytes,
+        msg_type: u16,
+        flags: u8,
     },
 }
 
+/// Manages the lifecycle and invocation of callbacks that are
+/// registered from the FFI boundary. Events are sent from
+/// various parts of the networking stack and processed on a
+/// dedicated thread to avoid blocking async tasks.
+///
+/// The manager holds optional callback pointers behind `Mutex`es
+/// so that registrations can happen at any time without races.
 pub struct CallbackManager {
-    receive_callback: Arc<Mutex<Option<ReceiveCallback>>>,
+    // optional FFI callback pointers protected by mutexes
+    connection_result_callback: Arc<Mutex<Option<ConnectionResultCallback>>>,
     leader_changed_callback: Arc<Mutex<Option<LeaderChangedCallback>>>,
     peer_status_callback: Arc<Mutex<Option<PeerStatusCallback>>>,
-    connection_result_callback: Arc<Mutex<Option<ConnectionResultCallback>>>,
-    event_tx: Mutex<Option<mpsc::Sender<CallbackEvent>>>,
+    receive_callback: Arc<Mutex<Option<ReceiveCallback>>>,
+
+    // handle of the thread running `callback_loop`
     callback_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    // channel used to send events to the callback thread
+    event_tx: Mutex<Option<mpsc::Sender<CallbackEvent>>>,
+    // shared flag used to signal shutdown of the thread
     shutdown: Arc<AtomicBool>,
 }
 
 impl CallbackManager {
+    /// Create a new manager, spawn the background thread and
+    /// give it ownership of the receiver side of the channel.
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::channel(1024);
 
-        let receive_cb: Arc<Mutex<Option<ReceiveCallback>>> = Arc::new(Mutex::new(None));
-        let leader_cb: Arc<Mutex<Option<LeaderChangedCallback>>> = Arc::new(Mutex::new(None));
-        let peer_status_cb: Arc<Mutex<Option<PeerStatusCallback>>> = Arc::new(Mutex::new(None));
-        let conn_result_cb: Arc<Mutex<Option<ConnectionResultCallback>>> =
+        // initially no callbacks registered
+        let connection_result_cb: Arc<Mutex<Option<ConnectionResultCallback>>> =
             Arc::new(Mutex::new(None));
+        let leader_changed_cb: Arc<Mutex<Option<LeaderChangedCallback>>> =
+            Arc::new(Mutex::new(None));
+        let peer_status_cb: Arc<Mutex<Option<PeerStatusCallback>>> = Arc::new(Mutex::new(None));
+        let receive_cb: Arc<Mutex<Option<ReceiveCallback>>> = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let thread_receive = Arc::clone(&receive_cb);
-        let thread_leader = Arc::clone(&leader_cb);
+        // clone arcs for the thread
+        let thread_connection_result = Arc::clone(&connection_result_cb);
+        let thread_leader_changed = Arc::clone(&leader_changed_cb);
         let thread_peer_status = Arc::clone(&peer_status_cb);
-        let thread_conn_result = Arc::clone(&conn_result_cb);
+        let thread_receive = Arc::clone(&receive_cb);
         let thread_shutdown = Arc::clone(&shutdown);
 
         let handle = std::thread::spawn(move || {
+            // the loop that runs on the dedicated thread
             Self::callback_loop(
                 event_rx,
-                thread_receive,
-                thread_leader,
+                thread_connection_result,
+                thread_leader_changed,
                 thread_peer_status,
-                thread_conn_result,
+                thread_receive,
                 thread_shutdown,
             );
         });
 
         Self {
-            receive_callback: receive_cb,
-            leader_changed_callback: leader_cb,
+            connection_result_callback: connection_result_cb,
+            leader_changed_callback: leader_changed_cb,
             peer_status_callback: peer_status_cb,
-            connection_result_callback: conn_result_cb,
-            event_tx: Mutex::new(Some(event_tx)),
+            receive_callback: receive_cb,
             callback_thread: Mutex::new(Some(handle)),
+            event_tx: Mutex::new(Some(event_tx)),
             shutdown,
         }
     }
 
+    /// Blocking loop executed on the helper thread. We pull
+    /// events out of the channel and dispatch them until either
+    /// the sender is dropped or a shutdown flag is set.
     fn callback_loop(
         mut event_rx: mpsc::Receiver<CallbackEvent>,
-        receive_cb: Arc<Mutex<Option<ReceiveCallback>>>,
-        leader_cb: Arc<Mutex<Option<LeaderChangedCallback>>>,
+        connection_result_cb: Arc<Mutex<Option<ConnectionResultCallback>>>,
+        leader_changed_cb: Arc<Mutex<Option<LeaderChangedCallback>>>,
         peer_status_cb: Arc<Mutex<Option<PeerStatusCallback>>>,
-        conn_result_cb: Arc<Mutex<Option<ConnectionResultCallback>>>,
+        receive_cb: Arc<Mutex<Option<ReceiveCallback>>>,
         shutdown: Arc<AtomicBool>,
     ) {
         while !shutdown.load(Ordering::Relaxed) {
@@ -97,26 +129,65 @@ impl CallbackManager {
                 Some(event) => {
                     Self::dispatch_event(
                         &event,
-                        &receive_cb,
-                        &leader_cb,
+                        &connection_result_cb,
+                        &leader_changed_cb,
                         &peer_status_cb,
-                        &conn_result_cb,
+                        &receive_cb,
                     );
                 }
-                None => break,
+                None => break, // channel closed
             }
         }
     }
 
+    /// Convert a `CallbackEvent` into a concrete FFI call if a
+    /// callback has been registered. Each branch takes the lock
+    /// briefly, clones or constructs a `CString` and invokes the
+    /// unsafe function pointer.
     fn dispatch_event(
         event: &CallbackEvent,
-        receive_cb: &Arc<Mutex<Option<ReceiveCallback>>>,
-        leader_cb: &Arc<Mutex<Option<LeaderChangedCallback>>>,
+        connection_result_cb: &Arc<Mutex<Option<ConnectionResultCallback>>>,
+        leader_changed_cb: &Arc<Mutex<Option<LeaderChangedCallback>>>,
         peer_status_cb: &Arc<Mutex<Option<PeerStatusCallback>>>,
-        conn_result_cb: &Arc<Mutex<Option<ConnectionResultCallback>>>,
+        receive_cb: &Arc<Mutex<Option<ReceiveCallback>>>,
     ) {
         match event {
-            CallbackEvent::MessageReceived {
+            CallbackEvent::ConnectionResult {
+                addr,
+                success,
+                error_code,
+            } => {
+                let cb = *connection_result_cb.lock();
+                if let Some(cb) = cb
+                    && let Ok(c_addr) = CString::new(addr.as_str())
+                {
+                    unsafe {
+                        cb(c_addr.as_ptr(), u8::from(*success), *error_code);
+                    }
+                }
+            }
+            CallbackEvent::LeaderChanged { leader_id } => {
+                let cb = *leader_changed_cb.lock();
+                if let Some(cb) = cb {
+                    let leader_str = leader_id.as_deref().unwrap_or("");
+                    if let Ok(c_leader) = CString::new(leader_str) {
+                        unsafe {
+                            cb(c_leader.as_ptr());
+                        }
+                    }
+                }
+            }
+            CallbackEvent::PeerStatusChanged { peer_id, status } => {
+                let cb = *peer_status_cb.lock();
+                if let Some(cb) = cb
+                    && let Ok(c_peer) = CString::new(peer_id.as_str())
+                {
+                    unsafe {
+                        cb(c_peer.as_ptr(), *status);
+                    }
+                }
+            }
+            CallbackEvent::Received {
                 peer_id,
                 data,
                 msg_type,
@@ -137,44 +208,12 @@ impl CallbackManager {
                     }
                 }
             }
-            CallbackEvent::LeaderChanged { leader_id } => {
-                let cb = *leader_cb.lock();
-                if let Some(cb) = cb {
-                    let leader_str = leader_id.as_deref().unwrap_or("");
-                    if let Ok(c_leader) = CString::new(leader_str) {
-                        unsafe {
-                            cb(c_leader.as_ptr());
-                        }
-                    }
-                }
-            }
-            CallbackEvent::PeerStatusChanged { peer_id, status } => {
-                let cb = *peer_status_cb.lock();
-                if let Some(cb) = cb
-                    && let Ok(c_peer) = CString::new(peer_id.as_str())
-                {
-                    unsafe {
-                        cb(c_peer.as_ptr(), *status);
-                    }
-                }
-            }
-            CallbackEvent::ConnectionResult {
-                addr,
-                success,
-                error_code,
-            } => {
-                let cb = *conn_result_cb.lock();
-                if let Some(cb) = cb
-                    && let Ok(c_addr) = CString::new(addr.as_str())
-                {
-                    unsafe {
-                        cb(c_addr.as_ptr(), u8::from(*success), *error_code);
-                    }
-                }
-            }
         }
     }
 
+    // ----- helper methods used by other modules --------------------------
+
+    /// Try to enqueue an event; on full queue we drop and log.
     pub fn send_event(&self, event: CallbackEvent) {
         let guard = self.event_tx.lock();
         if let Some(tx) = guard.as_ref()
@@ -184,28 +223,7 @@ impl CallbackManager {
         }
     }
 
-    pub fn send_message_received(&self, peer_id: &PeerId, data: Bytes, msg_type: u16, flags: u8) {
-        self.send_event(CallbackEvent::MessageReceived {
-            peer_id: peer_id.as_str().to_owned(),
-            data,
-            msg_type,
-            flags,
-        });
-    }
-
-    pub fn send_leader_changed(&self, leader_id: Option<&PeerId>) {
-        self.send_event(CallbackEvent::LeaderChanged {
-            leader_id: leader_id.map(|p| p.as_str().to_owned()),
-        });
-    }
-
-    pub fn send_peer_status(&self, peer_id: &PeerId, status: i32) {
-        self.send_event(CallbackEvent::PeerStatusChanged {
-            peer_id: peer_id.as_str().to_owned(),
-            status,
-        });
-    }
-
+    /// Helper method to send a connection result event.
     pub fn send_connection_result(&self, addr: &str, success: bool, error_code: i32) {
         self.send_event(CallbackEvent::ConnectionResult {
             addr: addr.to_owned(),
@@ -214,27 +232,62 @@ impl CallbackManager {
         });
     }
 
-    pub fn register_receive_callback(&self, cb: Option<ReceiveCallback>) {
-        *self.receive_callback.lock() = cb;
+    /// Helper method to send a leader changed event.
+    pub fn send_leader_changed(&self, leader_id: Option<&PeerId>) {
+        self.send_event(CallbackEvent::LeaderChanged {
+            leader_id: leader_id.map(|p| p.as_str().to_owned()),
+        });
     }
 
-    pub fn register_leader_changed_callback(&self, cb: Option<LeaderChangedCallback>) {
-        *self.leader_changed_callback.lock() = cb;
+    /// Helper method to send a peer status changed event.
+    pub fn send_peer_status(&self, peer_id: &PeerId, status: i32) {
+        self.send_event(CallbackEvent::PeerStatusChanged {
+            peer_id: peer_id.as_str().to_owned(),
+            status,
+        });
     }
 
-    pub fn register_peer_status_callback(&self, cb: Option<PeerStatusCallback>) {
-        *self.peer_status_callback.lock() = cb;
+    /// Helper method to send a received message event.
+    pub fn send_received(&self, peer_id: &PeerId, data: Bytes, msg_type: u16, flags: u8) {
+        self.send_event(CallbackEvent::Received {
+            peer_id: peer_id.as_str().to_owned(),
+            data,
+            msg_type,
+            flags,
+        });
     }
 
+    // ----- registration API ----------------------------------------------
+
+    /// Install or clear the connection result callback.
     pub fn register_connection_result_callback(&self, cb: Option<ConnectionResultCallback>) {
         *self.connection_result_callback.lock() = cb;
     }
 
-    pub fn drain_and_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        self.event_tx.lock().take();
+    /// Install or clear the leader change callback.
+    pub fn register_leader_changed_callback(&self, cb: Option<LeaderChangedCallback>) {
+        *self.leader_changed_callback.lock() = cb;
     }
 
+    /// Install or clear the peer status callback.
+    pub fn register_peer_status_callback(&self, cb: Option<PeerStatusCallback>) {
+        *self.peer_status_callback.lock() = cb;
+    }
+
+    /// Install or clear the receive callback.
+    pub fn register_receive_callback(&self, cb: Option<ReceiveCallback>) {
+        *self.receive_callback.lock() = cb;
+    }
+
+    // ----- shutdown helpers ----------------------------------------------
+
+    /// Stop accepting new events and signal the worker thread to exit.
+    pub fn drain_and_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.event_tx.lock().take(); // drop sender so loop ends
+    }
+
+    /// Wait for the background thread to terminate; log if it panicked.
     pub fn join_thread(&self) {
         if let Some(handle) = self.callback_thread.lock().take()
             && handle.join().is_err()

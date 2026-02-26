@@ -1,11 +1,23 @@
+//! Error types used throughout the network stack and the numeric
+//! codes exposed by the FFI boundary.
+
 use std::fmt;
 use std::io;
 
+/// Numeric codes exposed across the FFI boundary. These match
+/// the values returned by C APIs and are documented in the public
+/// header. Using negative numbers for errors keeps `0` as success.
 pub(crate) mod error_codes {
     pub const OK: i32 = 0;
+
+    // initialization / state
     pub const NOT_INITIALIZED: i32 = -1;
     pub const ALREADY_INITIALIZED: i32 = -2;
+
+    // argument validation
     pub const INVALID_ARGUMENT: i32 = -3;
+
+    // connection & network errors
     pub const CONNECTION_FAILED: i32 = -4;
     pub const PEER_NOT_FOUND: i32 = -5;
     pub const NOT_LEADER: i32 = -6;
@@ -16,32 +28,57 @@ pub(crate) mod error_codes {
     pub const DUPLICATE_PEER_ID: i32 = -11;
     pub const VERSION_MISMATCH: i32 = -12;
     pub const MAX_CONNECTIONS_REACHED: i32 = -13;
+
+    // catch-all internal error, not supposed to be returned normally
     pub const INTERNAL_ERROR: i32 = -99;
 }
 
 #[derive(Debug)]
+/// Rich error type used within the Rust implementation. Each
+/// variant corresponds to a particular failure mode; many are
+/// parameterized with details for diagnostics.
+///
+/// Variants are grouped roughly by category to make conversions
+/// and matching easier.
 pub enum NetworkError {
+    // --- initialization --------------------------------------------------
     NotInitialized,
     AlreadyInitialized,
+
+    // --- argument/validation ---------------------------------------------
     InvalidArgument(String),
+
+    // --- I/O and connection-level errors ---------------------------------
     Io(io::Error),
     ConnectionFailed(String),
-    PeerNotFound(String),
-    NotLeader,
-    SendQueueFull,
-    MessageTooLarge(u32),
-    Serialization(postcard::Error),
-    SessionMismatch { expected: String, got: String },
-    DuplicatePeerId(String),
-    VersionMismatch { expected: u16, got: u16 },
-    MaxConnectionsReached,
     HandshakeFailed(String),
     HandshakeTimeout,
+
+    // --- peer membership -------------------------------------------------
+    PeerNotFound(String),
+    DuplicatePeerId(String),
+    VersionMismatch { expected: u16, got: u16 },
+    SessionMismatch { expected: String, got: String },
+
+    // --- protocol state --------------------------------------------------
+    NotLeader,
+    MaxConnectionsReached,
+
+    // --- messaging -------------------------------------------------------
+    SendQueueFull,
+    MessageTooLarge(u32),
+
+    // --- serialization ---------------------------------------------------
+    Serialization(postcard::Error),
+
+    // --- misc / internal -------------------------------------------------
     NotImplemented,
     Internal(String),
 }
 
 impl NetworkError {
+    /// Map the Rust error variant to an FFI-compatible numeric code.
+    /// These codes match the constants defined in `error_codes`.
     pub fn error_code(&self) -> i32 {
         match self {
             Self::NotInitialized => error_codes::NOT_INITIALIZED,
@@ -71,13 +108,13 @@ impl fmt::Display for NetworkError {
             Self::NotInitialized => write!(f, "network not initialized"),
             Self::AlreadyInitialized => write!(f, "network already initialized"),
             Self::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
-            Self::Io(err) => write!(f, "IO error: {err}"),
+            Self::Io(e) => write!(f, "IO error: {e}"),
             Self::ConnectionFailed(msg) => write!(f, "connection failed: {msg}"),
             Self::PeerNotFound(id) => write!(f, "peer not found: {id}"),
             Self::NotLeader => write!(f, "not leader"),
             Self::SendQueueFull => write!(f, "send queue full"),
             Self::MessageTooLarge(size) => write!(f, "message too large: {size} bytes"),
-            Self::Serialization(err) => write!(f, "serialization error: {err}"),
+            Self::Serialization(e) => write!(f, "serialization error: {e}"),
             Self::SessionMismatch { expected, got } => {
                 write!(f, "session mismatch: expected {expected}, got {got}")
             }
@@ -97,22 +134,22 @@ impl fmt::Display for NetworkError {
 impl std::error::Error for NetworkError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(err) => Some(err),
-            Self::Serialization(err) => Some(err),
+            Self::Io(e) => Some(e),
+            Self::Serialization(e) => Some(e),
             _ => None,
         }
     }
 }
 
 impl From<io::Error> for NetworkError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
     }
 }
 
 impl From<postcard::Error> for NetworkError {
-    fn from(err: postcard::Error) -> Self {
-        Self::Serialization(err)
+    fn from(e: postcard::Error) -> Self {
+        Self::Serialization(e)
     }
 }
 
@@ -222,34 +259,34 @@ mod tests {
         );
         assert_eq!(NetworkError::NotImplemented.to_string(), "not implemented");
 
-        let err = NetworkError::InvalidArgument("bad".into());
-        assert!(err.to_string().contains("bad"));
+        let e = NetworkError::InvalidArgument("bad".into());
+        assert!(e.to_string().contains("bad"));
 
-        let err = NetworkError::MessageTooLarge(9999);
-        assert!(err.to_string().contains("9999"));
+        let e = NetworkError::MessageTooLarge(9999);
+        assert!(e.to_string().contains("9999"));
 
-        let err = NetworkError::SessionMismatch {
+        let e = NetworkError::SessionMismatch {
             expected: "a".into(),
             got: "b".into(),
         };
-        let s = err.to_string();
+        let s = e.to_string();
         assert!(s.contains("a") && s.contains("b"));
     }
 
     #[test]
     fn test_error_from_io() {
         let io_err = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
-        let err: NetworkError = io_err.into();
-        assert!(matches!(err, NetworkError::Io(_)));
-        assert_eq!(err.error_code(), error_codes::CONNECTION_FAILED);
+        let e: NetworkError = io_err.into();
+        assert!(matches!(e, NetworkError::Io(_)));
+        assert_eq!(e.error_code(), error_codes::CONNECTION_FAILED);
     }
 
     #[test]
     fn test_error_from_postcard() {
         let pc_err = postcard::Error::DeserializeBadVarint;
-        let err: NetworkError = pc_err.into();
-        assert!(matches!(err, NetworkError::Serialization(_)));
-        assert_eq!(err.error_code(), error_codes::SERIALIZATION_ERROR);
+        let e: NetworkError = pc_err.into();
+        assert!(matches!(e, NetworkError::Serialization(_)));
+        assert_eq!(e.error_code(), error_codes::SERIALIZATION_ERROR);
     }
 
     #[test]

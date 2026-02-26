@@ -1,9 +1,21 @@
+//! Packet definitions and helpers for encoding/decoding user and
+//! internal messages, including optional compression.
+
 use bytes::Bytes;
 
 use crate::config::MAX_MESSAGE_SIZE;
 use crate::error::NetworkError;
 use crate::protocol::{InternalMessage, msg_types};
 
+/// In‑memory representation of a network packet. This is the
+/// wire format used by `TransportManager` after framing/de-framing.
+///
+/// - `msg_type` is either an internal message code (<0x0100) or a
+///   user message identifier.
+/// - `flags` contains a compression bit plus seven user‑definable
+///   flag bits.
+/// - `payload` holds either raw bytes or the serialized
+///   `InternalMessage` when `msg_type` is internal.
 #[derive(Clone, Debug)]
 pub struct RawPacket {
     pub msg_type: u16,
@@ -12,21 +24,31 @@ pub struct RawPacket {
 }
 
 impl RawPacket {
+    /// Was the payload compressed by `encode_packet`? Checks the low
+    /// bit of `flags` which is reserved for compression.
     pub fn is_compressed(&self) -> bool {
         self.flags & 0x01 != 0
     }
 
+    /// Does the packet carry an internal protocol message rather
+    /// than a user payload? Internal messages have type codes below
+    /// `USER_MESSAGE_START`.
     pub fn is_internal(&self) -> bool {
         self.msg_type < msg_types::USER_MESSAGE_START
     }
 }
 
+/// Build a user packet, optionally compressing the payload if it
+/// exceeds `compression_threshold`. The caller provides `user_flags`;
+/// the low bit is reserved and will be cleared.
 pub fn encode_packet(
     msg_type: u16,
     data: &[u8],
     user_flags: u8,
     compression_threshold: u32,
 ) -> Result<RawPacket, NetworkError> {
+    // enforce user message range; internal messages use
+    // `encode_internal`.
     if msg_type < msg_types::USER_MESSAGE_START {
         return Err(NetworkError::InvalidArgument(
             "msg_type must be >= 0x0100 for user messages".into(),
@@ -37,14 +59,14 @@ pub fn encode_packet(
         return Err(NetworkError::MessageTooLarge(data.len() as u32));
     }
 
-    let clean_flags = user_flags & 0xFE;
+    let clean_flags = user_flags & 0xFE; // drop compression bit
 
     if data.len() as u32 > compression_threshold {
         let compressed = lz4_flex::block::compress_prepend_size(data);
         if compressed.len() < data.len() {
             return Ok(RawPacket {
                 msg_type,
-                flags: clean_flags | 0x01,
+                flags: clean_flags | 0x01, // set compression bit
                 payload: Bytes::from(compressed),
             });
         }
@@ -57,6 +79,9 @@ pub fn encode_packet(
     })
 }
 
+/// Return the uncompressed payload bytes. If the packet has the
+/// compression flag set, decompress using LZ4; otherwise clone the
+/// existing buffer.
 pub fn decode_payload(packet: &RawPacket) -> Result<Bytes, NetworkError> {
     if packet.is_compressed() {
         lz4_flex::block::decompress_size_prepended(&packet.payload)
@@ -67,6 +92,9 @@ pub fn decode_payload(packet: &RawPacket) -> Result<Bytes, NetworkError> {
     }
 }
 
+/// Serialize one of the internal protocol messages into a
+/// `RawPacket` with an appropriate `msg_type` code. Internal
+/// packets are never compressed and always use flag=0.
 pub fn encode_internal(msg: &InternalMessage) -> Result<RawPacket, NetworkError> {
     let payload = postcard::to_allocvec(msg)?;
 
@@ -96,6 +124,8 @@ pub fn encode_internal(msg: &InternalMessage) -> Result<RawPacket, NetworkError>
     })
 }
 
+/// Decode a packet that was known to be internal back into the
+/// `InternalMessage` enum.
 pub fn decode_internal(packet: &RawPacket) -> Result<InternalMessage, NetworkError> {
     postcard::from_bytes(&packet.payload).map_err(NetworkError::Serialization)
 }
