@@ -1,6 +1,8 @@
 {
   "recommendations": [
     "EditorConfig.EditorConfig",
+    "ms-dotnettools.csharp",
+    "redhat.vscode-xml",
     "rust-lang.rust-analyzer",
     "streetsidesoftware.code-spell-checker",
     "tamasfe.even-better-toml"

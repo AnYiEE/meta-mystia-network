@@ -1,11 +1,17 @@
 {
   "editor.formatOnSave": true,
   "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "[csharp]": {
+    "editor.defaultFormatter": "ms-dotnettools.csharp"
+  },
   "[rust]": {
     "editor.defaultFormatter": "rust-lang.rust-analyzer"
   },
   "[toml]": {
     "editor.defaultFormatter": "tamasfe.even-better-toml"
+  },
+  "[xml]": {
+    "editor.defaultFormatter": "redhat.vscode-xml"
   },
   "explorer.fileNesting.enabled": true,
   "explorer.fileNesting.expand": false,
@@ -15,6 +21,7 @@
   },
   "cSpell.words": [
     "allocvec",
+    "cdecl",
     "cdylib",
     "codegen",
     "keepalive",
@@ -22,8 +29,10 @@
     "metamystia",
     "mystia",
     "reinit",
+    "repr",
     "serde",
     "varint",
-    "winres"
+    "winres",
+    "xunit"
   ]
 }
