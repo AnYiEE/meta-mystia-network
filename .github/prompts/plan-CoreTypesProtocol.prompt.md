@@ -4,6 +4,8 @@
 
 本计划覆盖项目依赖配置和最底层的类型/协议定义，所有上层模块均依赖这些内容。
 
+注意：文档同时显示 Rust 内部名（snake_case）与 FFI 导出名（CamelCase），并在需要时标明对应关系（例如 `get_peer_list` ↔ `GetPeerList`）。
+
 ---
 
 ## Steps
@@ -13,19 +15,26 @@
 添加运行时依赖：
 
 - `tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }` — 异步 TCP IO + 定时器
-- `tokio-util = { version = "0.7", features = ["codec", "sync"] }` — 粘包处理（LengthDelimitedCodec）+ CancellationToken
+- `tokio-util = { version = "0.7", features = ["codec", "sync"] }` — 编解码框架（用于 `Framed`）与 `CancellationToken`。注意：crate 名称为 `tokio-util`，在代码中以 `tokio_util` 命名空间引用；本项目使用自定义 `PacketCodec` 实现粘包/分帧。
 - `bytes = "1"` — PacketBuffer 使用 BytesMut
-- `socket2 = "0.5"` — 设置 TCP Keep-alive
-- `mdns-sd = "0.18"` — 局域网服务发现
-- `lz4_flex = "0.12"` — LZ4 压缩/解压
-- `postcard = { version = "1.1", features = ["alloc"] }` — 二进制序列化
+- `futures-util = { version = "0.3", features = ["sink"] }` — `SinkExt`/`StreamExt` 用于 Framed 读写
+- `hostname = "0.4"` — mDNS 服务注册时获取本机主机名
+- `socket2 = "0.6"` — 设置 TCP Keep-alive
+- `mdns-sd = { version = "0.18", features = ["async"], default-features = false }` — 局域网服务发现
+- `lz4_flex = { version = "0.12", default-features = false }` — LZ4 压缩/解压
+- `postcard = { version = "1.1", features = ["alloc"], default-features = false }` — 二进制序列化
 - `serde = { version = "1", features = ["derive"] }` — 序列化框架
-- `rand = "0.9"` — 选举超时随机化
+- `rand = { version = "0.9", features = ["std", "thread_rng"], default-features = false }` — 选举超时随机化
 - `tracing = "0.1"` — 日志
 - `tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }` — 日志后端
 - `parking_lot = "0.12"` — 更高效的 Mutex/RwLock
 
-设置 crate 类型和 feature：
+添加构建依赖（`[build-dependencies]`）：
+
+- `thunk-rs = { version = "0.3", features = ["lib", "win7"], default-features = false }` — Windows 7 兼容导出 thunk
+- `winres = "0.1"` — Windows 资源编译
+
+设置 crate 类型、feature 与 release 构建优化：
 
 ```toml
 [lib]
@@ -34,9 +43,16 @@ crate-type = ["cdylib"]
 [features]
 default = []
 logging = ["dep:tracing-subscriber"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
 ```
 
-> `cdylib` 生成 C 兼容动态库（Windows `.dll` / macOS `.dylib`）。不要同时加 `rlib`，否则会影响符号导出和体积。
+> `cdylib` 生成 C 兼容动态库（Windows `.dll` / macOS `.dylib`）。不要同时加 `rlib`，否则会影响符号导出和体积。`panic = "abort"` 与 `catch_unwind` 在 Release 下配合使用时，uncaught panic 直接终止进程，已被 FFI 层 `catch_unwind` 拦截处理。
 
 ### 2. `src/config.rs` — 配置与常量
 
@@ -53,7 +69,7 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// 握手超时时间
 pub const HANDSHAKE_TIMEOUT_MS: u64 = 5000;
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug)]
 pub struct NetworkConfig {
     /// 压缩阈值（字节），超过此大小自动压缩，默认 512
     pub compression_threshold: u32,
@@ -98,7 +114,7 @@ impl NetworkConfig {
     /// 验证配置合理性，返回第一个发现的错误。
     /// 约束：heartbeat > 0, election_min > heartbeat, election_min ≤ election_max,
     /// timeout_multiplier > 0, reconnect_initial > 0 且 ≤ reconnect_max, queue > 0
-    pub fn validate(&self) -> Result<(), String> { /* 逐项检查上述约束 */ }
+    pub fn validate(&self) -> Result<(), NetworkError> { /* 逐项检查上述约束 */ }
 }
 ```
 
@@ -108,6 +124,7 @@ impl NetworkConfig {
 
 - `PeerId`：字符串型 peer 标识（包装 `String`，实现 `Hash`, `Eq`, `Clone`）
 - `PeerStatus` 枚举：`Connected`, `Disconnected`, `Reconnecting`, `Handshaking`
+  - 提供 `as_i32()` 方法用于 FFI 回调/外部消费，映射为 0/1/2/3
 - `PeerInfo` 结构体：
   - `peer_id: PeerId`
   - `addr: SocketAddr` — 对端的监听地址（IP + listen_port），用于断线重连
@@ -123,11 +140,11 @@ impl NetworkConfig {
 
 **消息头格式（7 字节）：**
 
-| 字段       | 大小    | 说明                                             |
-| ---------- | ------- | ------------------------------------------------ |
-| `length`   | 4 bytes | payload 长度（大端），不含 header 的 7 字节      |
-| `msg_type` | 2 bytes | 消息类型（大端）                                 |
-| `flags`    | 1 byte  | bit 0: 已压缩（库内部管理）；bit 1-7: 用户自定义 |
+| 字段       | 大小    | 说明                                                                       |
+| ---------- | ------- | -------------------------------------------------------------------------- |
+| `length`   | 4 bytes | payload 长度（大端），不含 header 的 7 字节                                |
+| `msg_type` | 2 bytes | 消息类型（大端）                                                           |
+| `flags`    | 1 byte  | bit 0: 已压缩（库内部管理，编码时会清除用户传入该位）；bit 1-7: 用户自定义 |
 
 `total_bytes = 7 (header) + length (payload)`
 
@@ -140,7 +157,7 @@ impl NetworkConfig {
 
 **flags 语义：**
 
-- **bit 0 (`0x01`)：压缩标志** — 由库的编码层自动设置/读取，C# 不应手动操作此位。
+- **bit 0 (`0x01`)：压缩标志** — 由库的编码层自动设置/读取。编码函数会先将传入的 `user_flags` 低位清零，再根据压缩情况设置该位；因此 C# 不应手动操作此位。
 - **bit 1-7：用户自定义标志** — C# 可自由使用（如标记消息优先级、是否需要回执等），库透传不修改。
 
 **InternalMessage 枚举（完整）：**
@@ -297,3 +314,12 @@ impl NetworkError {
 - `NetworkConfig::validate()` 拒绝非法参数组合
 - `HandshakeAck` 包含 `listen_port` 字段
 - `flags` 文档明确 bit 0 为库内部使用
+
+## 实现映射（关键常量与 FFI 相关项）
+
+- **配置与常量**：`MAX_MESSAGE_SIZE`, `HANDSHAKE_TIMEOUT_MS`, `PROTOCOL_VERSION` 等常量定义在 `src/config.rs`，FFI 层在校验数据与长度时使用这些常量。
+- **NetworkConfigFFI**：位于 `src/ffi.rs` 的 `NetworkConfigFFI` 与本模块的 `NetworkConfig` 通过 `impl From<&NetworkConfigFFI> for NetworkConfig` 映射（字段一一对应，padding 已考虑）。
+- **错误码**：`error_codes` 常量定义在 `src/error.rs`，FFI 函数统一返回 `i32` 错误码并可通过 `GetLastErrorCode`/`GetLastErrorMessage` 查询。
+- **消息类型边界**：`msg_types::USER_MESSAGE_START == 0x0100` 为用户消息起点，FFI 与发送接口均在入口处验证该边界（见 `src/ffi.rs` 的 `BroadcastMessage` / `SendToPeer` 调用链）。
+
+（此处内容为对实现的精确映射补充，用于后续子计划的对齐与查证。）

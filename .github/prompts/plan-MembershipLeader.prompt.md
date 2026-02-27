@@ -6,6 +6,8 @@
 
 本计划覆盖 Peer 列表管理、存活探测、RTT 测量和简化 Raft Leader Election。
 
+注意：本文件同时描述内部 Rust 实现（snake_case）与 FFI 导出（CamelCase），并在上下文中说明对应关系。
+
 ---
 
 ## Steps
@@ -26,17 +28,17 @@ pub struct MembershipManager {
 
 #[derive(Debug, Clone)]
 pub enum MembershipEvent {
-    PeerJoined(PeerId),
-    PeerLeft(PeerId),
-    PeerStatusChanged { peer_id: PeerId, old: PeerStatus, new: PeerStatus },
+    Joined(PeerId),
+    Left(PeerId),
+    StatusChanged { peer_id: PeerId, old: PeerStatus, new: PeerStatus },
 }
 ```
 
 **功能：**
 
 1. **Peer 列表维护**：
-   - `add_peer(peer_id, addr) -> Result<(), NetworkError>`：添加前检查 peer_id 是否已存在
-   - `remove_peer(peer_id)`：移除 peer 并发送 `PeerLeft` 事件
+   - `add_peer(peer_id, addr) -> Result<(), NetworkError>`：添加前检查 peer_id 是否已存在，发送 `Joined` 事件
+   - `remove_peer(peer_id)`：移除 peer 并发送 `Left` 事件
    - `update_status(peer_id, status)`：更新状态并发送事件
    - `has_peer(peer_id) -> bool`：检查 peer 是否存在（用于去重检查）
    - `get_peer_list() -> Vec<PeerInfo>`：返回所有 peer 的克隆列表
@@ -44,6 +46,7 @@ pub enum MembershipEvent {
    - `get_peer_rtt(peer_id) -> Option<u32>`：获取指定 peer 的 RTT
    - `get_peer_status(peer_id) -> Option<PeerStatus>`：获取指定 peer 的状态
    - `get_connected_peer_count() -> usize`：返回 Connected 状态的 peer 数量（不含自己）
+   - `update_last_seen(peer_id)`：仅刷新指定 peer 的存活时间戳，Transport 在收到任何用户或内部消息时调用；与 `handle_pong` 配合使用。
 
 2. **Peer ID 冲突检测**：
    - 握手时检查 `peer_id` 是否已存在于连接列表
@@ -75,7 +78,7 @@ pub enum MembershipEvent {
 
 6. **broadcast channel Lagged 容错**：
    - `tokio::sync::broadcast` 容量 256，若 receiver 消费速度跟不上 sender，会触发 `RecvError::Lagged(n)` 丢弃最旧的 n 条消息
-   - **处理策略**：receiver 收到 `Lagged` 时，记录 `warn!` 日志，然后从 `MembershipManager` 获取全量 peer 列表做一次完整状态同步
+   - **处理策略**：receiver 收到 `Lagged` 时，记录 `warn!` 日志并退出当前 drain 循环（不做全量同步，成员状态可通过 `get_peer_list()` 单独获取）
    - 这确保 LeaderElection 不会因错过 `PeerLeft` 事件而保留过期的 peer 计数
 
 ### 2. `src/leader.rs` — Leader 选举
@@ -98,7 +101,6 @@ struct ElectionState {
 pub struct LeaderElection {
     local_peer_id: PeerId,
     state: RwLock<ElectionState>,
-    config: NetworkConfig,
     membership_rx: Mutex<broadcast::Receiver<MembershipEvent>>,
     leader_change_tx: mpsc::Sender<Option<PeerId>>,
 }
@@ -153,7 +155,7 @@ pub enum Role {
 ```rust
 /// total_nodes = 网络中的总节点数（含自己）
 ///             = 1 (self) + connected_peer_count
-fn get_majority_threshold(&self, total_nodes: usize) -> usize {
+fn majority_threshold(total_nodes: usize) -> usize {
     if total_nodes <= 2 {
         // 1 节点：自己即为 Leader（阈值 1，自投即达成）
         // 2 节点：任一节点存活即可为 Leader（阈值 1），
@@ -192,8 +194,8 @@ fn get_majority_threshold(&self, total_nodes: usize) -> usize {
 
 **broadcast Lagged 处理**：
 
-- `membership_rx` 收到 `Lagged` 时，从 MembershipManager 获取全量 connected peers 列表
-- 重新计算 `total_nodes` 以确保多数派阈值正确
+- `membership_rx` 收到 `Lagged` 时，记录 `warn!` 日志并退出当前 drain 循环（不做实际全量同步）
+- 实际节点计数由 `drain_membership_events` 的调用方在外层维护，Lagged 时 `connected_peer_count` 可能偏小，选举误匹配 不影响正确性只影响决策时机
 
 ---
 
@@ -207,5 +209,13 @@ fn get_majority_threshold(&self, total_nodes: usize) -> usize {
 - 网络分区恢复后 Leader 统一测试（高 term 优先 + 同 term 字典序平局）
 - 心跳发送/接收/超时检测测试
 - RTT 计算准确性测试
-- broadcast channel Lagged 后状态同步测试
-- `get_majority_threshold` 对 1/2/3/5 节点的返回值验证
+- broadcast channel Lagged 记录 warn 日志并退出测试
+- `majority_threshold` 对 1/2/3/5/7 节点的返回值验证
+
+## 实现映射（关键函数/FFI）
+
+- Membership 内部方法：`MembershipManager::add_peer`、`remove_peer`、`get_connected_peers`、`get_connected_peer_count`、`get_peer_rtt`、`get_peer_status`，这些方法在 `src/membership.rs` 实现并被 `NetworkState`/`transport` 的消息处理器调用。
+- Leader 内部方法：`LeaderElection::set_leader`（返回 `(term, leader_id, assigner_id)` 并由调用方广播 `LeaderAssign`）、`LeaderElection::enable_auto_election`、`LeaderElection::leader_id()`、`LeaderElection::is_leader()`。FFI 对应函数为 `SetLeader`、`EnableAutoLeaderElection`、`GetCurrentLeader`、`IsLeader`（位于 `src/ffi.rs`）。
+- 事件通知：`MembershipManager` 使用 `broadcast::Sender<MembershipEvent>`（容量 256），`LeaderElection` 通过 `leader_change_tx` 通知变化，FFI 的 `RegisterPeerStatusCallback` / `RegisterLeaderChangedCallback` 最终在 `callback.rs` 中触发 C# 回调。
+
+（以上映射用于验证文档中关于事件流、投票统计与多数派阈值的描述与实现一致。）

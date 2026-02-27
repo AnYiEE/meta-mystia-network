@@ -4,7 +4,9 @@
 >
 > 依赖：`plan-CoreTypesProtocol`（config、types、protocol、error）
 
-本计划覆盖 TCP 连接管理和消息编解码，是网络通信的核心基础设施。
+本计划覆盖 TCP 连接管理与消息编解码，是网络通信的核心基础设施。
+
+注意：文档同时列出内部 Rust 方法（snake_case）与 FFI 导出函数（CamelCase），并注明对应关系。例如：内部 `PacketCodec::new()`，FFI 层的 `ConnectToPeer`。
 
 ---
 
@@ -19,7 +21,7 @@
 pub struct RawPacket {
     pub msg_type: u16,
     pub flags: u8,
-    pub payload: Vec<u8>,
+    pub payload: bytes::Bytes, // 使用 Bytes 以便零拷贝共享
 }
 
 impl RawPacket {
@@ -37,12 +39,16 @@ impl RawPacket {
 
 1. **encode_packet(msg_type, data, user_flags, compression_threshold) -> RawPacket**：
    - **msg_type 验证**：若 `msg_type < USER_MESSAGE_START`（即 `< 0x0100`），返回 `NetworkError::InvalidArgument`（仅用户消息调用此函数；内部消息使用 `encode_internal`）
-   - 若 `data.len() > threshold`，使用 `lz4_flex::block::compress_prepend_size` 压缩
-   - 压缩后设置 `flags = user_flags | 0x01`（合并用户标志与压缩标志）
-   - 若压缩后反而更大，保留原始数据，`flags = user_flags`（不设压缩位）
-   - 若 `data.len() <= threshold`，`flags = user_flags`
+   - **flags 预处理**：先将 `user_flags` 的低位（压缩标志位）清零——`let clean_flags = user_flags & 0xFE`。后续步骤基于 `clean_flags` 构建返回值。
+   - **大小检查**：若 `data.len() as u32 > MAX_MESSAGE_SIZE`，立即返回 `NetworkError::MessageTooLarge`
+   - 如果 `data.len()` 超过 `compression_threshold`：
+     - 调用 `lz4_flex::block::compress_prepend_size` 压缩
+     - 若压缩结果比原始数据短，返回 `RawPacket { msg_type, flags: clean_flags | 0x01, payload: Bytes::from(compressed) }`（低位用于标记已压缩）
+     - 否则（压缩无利），忽略压缩结果，继续往下返回原始数据
+   - 如果 `data.len() <= compression_threshold` 或压缩不生成更小结果：
+     - 返回 `RawPacket { msg_type, flags: clean_flags, payload: Bytes::copy_from_slice(data) }`，不设置压缩位
 
-2. **decode_payload(packet: &RawPacket) -> Result<Vec<u8>, NetworkError>**：
+2. **decode_payload(packet: &RawPacket) -> Result<bytes::Bytes, NetworkError>**：
    - 若 `flags & 0x01`，使用 `lz4_flex::block::decompress_size_prepended` 解压
    - 返回解压后的原始数据
 
@@ -93,7 +99,7 @@ impl TransportManager {
         session_id: String,
         config: NetworkConfig,
         shutdown_token: CancellationToken,
-    ) -> Result<(Self, mpsc::Receiver<(PeerId, RawPacket)>), NetworkError> {
+    ) -> Result<(Arc<Self>, mpsc::Receiver<(PeerId, RawPacket)>), NetworkError> {
         let (incoming_tx, incoming_rx) = mpsc::channel(256); // 汇总所有 peer 的入站消息，容量独立于 per-peer send_queue
         // ... 绑定 TCP listener、启动 accept 循环 ...
         Ok((manager, incoming_rx))
@@ -103,7 +109,9 @@ impl TransportManager {
 
 > `incoming_rx` 由调用方（`NetworkState::new`）传给 `spawn_message_handler`，而非藏在 `Arc<TransportManager>` 中。这样 `TransportManager` 自身不持有 `Receiver`（不可 Clone），消息处理逻辑与 Transport 完全解耦，便于分别测试。
 
-**PacketCodec（基于 tokio_util Encoder/Decoder）：**
+**PacketCodec（基于 `tokio-util` 的 Encoder/Decoder 框架，代码中以 `tokio_util` 引用）：**
+
+此处使用 `tokio-util` 提供的 `Framed`/codec 框架（代码中以 `tokio_util::codec::Framed` 引用）。项目实现了自定义的 `PacketCodec`（替代通用的 `LengthDelimitedCodec`），以满足 7 字节头部的自定义协议。
 
 ```rust
 pub struct PacketCodec {
@@ -123,7 +131,10 @@ impl Decoder for PacketCodec {
         }
 
         let total = 7 + length as usize;
-        if src.len() < total { return Ok(None); }
+        if src.len() < total {
+            src.reserve(total - src.len());
+            return Ok(None);
+        }
 
         let header = src.split_to(7);
         let payload = src.split_to(length as usize);
@@ -131,7 +142,8 @@ impl Decoder for PacketCodec {
         Ok(Some(RawPacket {
             msg_type: u16::from_be_bytes([header[4], header[5]]),
             flags: header[6],
-            payload: payload.to_vec(),
+            // returns an owned `Bytes` buffer
+            payload: payload.freeze(),
         }))
     }
 }
@@ -142,10 +154,10 @@ impl Encoder<RawPacket> for PacketCodec {
     fn encode(&mut self, item: RawPacket, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let length = item.payload.len() as u32;
         dst.reserve(7 + item.payload.len());
-        dst.put_u32(length);           // 4 bytes: payload length (big-endian)
-        dst.put_u16(item.msg_type);    // 2 bytes: msg_type (big-endian)
-        dst.put_u8(item.flags);        // 1 byte:  flags
-        dst.put_slice(&item.payload);  // N bytes: payload
+        dst.put_u32(length);
+        dst.put_u16(item.msg_type);
+        dst.put_u8(item.flags);
+        dst.put_slice(&item.payload);
         Ok(())
     }
 }
@@ -172,7 +184,7 @@ impl Encoder<RawPacket> for PacketCodec {
      - `peer_id` 不能与已有连接冲突
    - 验证通过返回 `HandshakeAck { peer_id, listen_port, success: true }`，随后发送 `PeerListSync`
    - 验证失败返回 `HandshakeAck { success: false, error_reason }` 并关闭连接
-   - **超时处理**：5s 内未完成握手（未收到 Handshake 或 HandshakeAck），关闭连接并返回 `NetworkError::HandshakeTimeout`
+   - **超时处理**：5s 内未完成握手（未收到 Handshake 或 HandshakeAck），关闭连接并返回 `NetworkError::HandshakeTimeout`（在 FFI 层映射为 `error_codes::CONNECTION_FAILED`）。
    - **成功后通知**：握手成功后，Transport 将收到的 Handshake（被动方）或 HandshakeAck（主动方）转发至 `incoming_rx`，消息处理器据此调用 `membership.add_peer()` 并触发 `PeerJoined` 事件
 
 4. **PeerListSync 去重**：
@@ -190,19 +202,28 @@ impl Encoder<RawPacket> for PacketCodec {
    - `send_to_peer(peer_id, packet) -> Result<(), NetworkError>`
    - `broadcast(packet, exclude: Option<&[PeerId]>) -> Vec<(PeerId, NetworkError)>` 返回失败列表
    - 发送队列满时返回 `NetworkError::SendQueueFull`
+7. **其他公开辅助方法**（供测试或上层逻辑使用）：
+   - `get_connected_peer_ids() -> Vec<PeerId>`
+   - `has_peer(peer_id) -> bool`
+   - `set_should_reconnect(peer_id, bool)`
+   - `update_peer_status(peer_id, PeerStatus)`
+   - `update_last_seen(peer_id)` / `update_rtt(peer_id, rtt_ms)`
+   - `get_peer_rtt(peer_id) -> Option<u32>` / `get_peer_status(peer_id) -> Option<PeerStatus>`
+   - `get_peer_addr(peer_id) -> Option<SocketAddr>`
+     这组方法主要用于 `lib.rs` 的消息处理和测试验证。
 
-7. **DisconnectPeer**：
-   - 发送 `PeerLeave` 消息给目标 peer
-   - 设置 `PeerInfo.should_reconnect = false`
-   - 取消该 peer 的重连 task（通过 per-peer `CancellationToken`）
-   - 关闭 TCP 连接
-   - 从 membership 中移除
+8. **DisconnectPeer**：
+   - 向目标 peer 发送 `PeerLeave` 消息（最尽力，发送失败时只记录 debug 日志，不报错）
+   - 设置 `conn.info.should_reconnect = false`
+   - 取消 per-peer `CancellationToken`（停止读/写 task）
+   - 从 connections map 中移除
+   - 注意：membership 的移除由调用方负责（FFI 的 `DisconnectPeer` 另行调用 `membership.remove_peer()`）
 
-8. **优雅关闭（顺序关键）**：
+9. **优雅关闭（顺序关键）**：
    1. 向所有连接发送 `PeerLeave` 消息（此时 write task 仍在运行）
    2. 等待发送队列清空（最多 1s）
    3. 触发 `shutdown_token.cancel()`（通知所有 task 退出）
-   4. 关闭所有 TCP 连接
+   4. 设置所有 peer 的 `should_reconnect = false`，清空 connections map
 
 **线程模型**：每个连接 spawn 两个 tokio task：
 
@@ -220,7 +241,20 @@ impl Encoder<RawPacket> for PacketCodec {
 - `encode_internal` / `decode_internal` 单元测试：InternalMessage 所有变体序列化/反序列化往返
 - 消息大小验证：超过 `MAX_MESSAGE_SIZE` 时返回正确错误
 - 2 节点 loopback TCP 连接 + 握手成功集成测试
+- 握手版本不匹配/session 不匹配/重复 peer_id 时返回失败并发送含 reason 的 `HandshakeAck`
 - 握手超时测试：一方不发 Handshake，5s 后连接关闭
+- 超过 `MAX_CONNECTIONS` 时拒绝新连接
 - `DisconnectPeer` 后不触发自动重连
 - PeerListSync 触发的连接遵循字典序去重规则
 - **TCP Keep-alive 在 Windows 和 macOS 上均不报错**（Windows 跳过 retries 设置）
+
+## 实现映射（关键函数/方法）
+
+- FFI → Transport：`ConnectToPeer` 调用 `transport.connect_to(addr)`（在 `src/ffi.rs` 中通过 tokio runtime spawn 异步执行）；`DisconnectPeer` 调用 `TransportManager::disconnect_peer`。
+- Transport 暴露的内部方法：`TransportManager::new(...) -> (Arc<Self>, incoming_rx)`, `connect_to(&self, addr: &str)`, `register_connection`, `send_to_peer(&self, peer_id, packet)`, `broadcast(&self, packet, exclude)`, `drain_send_queues(timeout)`, `shutdown()`。
+  另外还有若干辅助查询/控制方法用于上层逻辑与测试：
+  `get_connected_peer_ids()`, `has_peer()`, `set_should_reconnect()`, `update_peer_status()`, `update_last_seen()` / `update_rtt()`, `get_peer_rtt()`, `get_peer_status()`, `get_peer_addr()`。
+- PacketCodec 行为：`Decoder` 在成功切出 header 与 payload 后使用 `payload.freeze()` 返回 `Bytes`，`Encoder` 在写入前调用 `dst.reserve(7 + payload.len())`；这与 `messaging.rs` 中 `RawPacket` 的零拷贝设计一致。
+- 握手流程与超时：`HANDSHAKE_TIMEOUT_MS` 在 `src/config.rs` 定义（5s），`receive_handshake`/`receive_handshake_ack` 在 `transport.rs` 中实现；失败返回 `HandshakeTimeout`（FFI 映射到 `CONNECTION_FAILED`）或 `HandshakeFailed`。
+
+（将此映射作为 Transport 计划的权威引用，便于与 FFI/上层逻辑一一核对。）

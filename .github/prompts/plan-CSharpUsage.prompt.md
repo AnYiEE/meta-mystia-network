@@ -1,8 +1,8 @@
 # Plan: C# 使用方式与接入指南
 
-> 面向 C# IL2CPP 游戏 Mod 开发者，说明如何接入 Rust P2P 网络库。
->
-> Rust 侧接口定义见 `plan-FFIIntegration.prompt.md`。
+面向 C# IL2CPP 开发者，说明如何接入并正确使用 Rust P2P 网络库的 FFI 约定与常用调用模式。
+
+Rust 侧接口定义见 `plan-FFIIntegration.prompt.md`。
 
 ---
 
@@ -50,6 +50,7 @@ public enum PeerStatus
     Connected = 0,
     Disconnected = 1,
     Reconnecting = 2,
+    Handshaking = 3,
 }
 ```
 
@@ -88,14 +89,14 @@ public struct NetworkConfigFFI
     public ulong election_timeout_min_ms;
     /// <summary>选举超时最大值（ms），须 ≥ min。默认 3000</summary>
     public ulong election_timeout_max_ms;
+    /// <summary>存活超时倍数：连续 N 个周期未收到 Pong 判定离线。默认 3</summary>
+    public uint  heartbeat_timeout_multiplier;
     /// <summary>断线重连初始间隔（ms），指数退避起点。默认 1000</summary>
     public ulong reconnect_initial_ms;
     /// <summary>断线重连最大间隔（ms），退避上限。默认 30000</summary>
     public ulong reconnect_max_ms;
     /// <summary>LZ4 压缩阈值（字节），payload 超此大小自动压缩。默认 512</summary>
     public uint  compression_threshold;
-    /// <summary>存活超时倍数：连续 N 个周期未收到 Pong 判定离线。默认 3</summary>
-    public uint  heartbeat_timeout_multiplier;
     /// <summary>per-peer 发送队列上限。满时返回 SendQueueFull。默认 1024</summary>
     public uint  send_queue_capacity;
     /// <summary>中心化模式下 Leader 自动转发。0=需 C# 手动 Forward，1=自动。默认 1</summary>
@@ -110,10 +111,10 @@ public struct NetworkConfigFFI
         heartbeat_interval_ms = 500,
         election_timeout_min_ms = 1500,
         election_timeout_max_ms = 3000,
+        heartbeat_timeout_multiplier = 3,
         reconnect_initial_ms = 1000,
         reconnect_max_ms = 30000,
         compression_threshold = 512,
-        heartbeat_timeout_multiplier = 3,
         send_queue_capacity = 1024,
         centralized_auto_forward = 1,
         auto_election_enabled = 1,
@@ -137,7 +138,7 @@ public delegate void ReceiveCallback(IntPtr peerId, IntPtr data, int length, ush
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate void LeaderChangedCallback(IntPtr leaderPeerId);
 
-/// <summary>Peer 连接状态变更时触发。status: 0=Connected, 1=Disconnected, 2=Reconnecting。</summary>
+/// <summary>Peer 连接状态变更时触发。status: 0=Connected, 1=Disconnected, 2=Reconnecting, 3=Handshaking。</summary>
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate void PeerStatusCallback(IntPtr peerId, int status);
 
@@ -247,7 +248,7 @@ public static class MetaMystiaNetwork
     [DllImport(DLL, CallingConvention = CC, CharSet = CS)]
     public static extern int GetPeerRTT(string peerId);
 
-    /// <summary>获取指定 peer 的连接状态。0=Connected, 1=Disconnected, 2=Reconnecting, -1=不存在。</summary>
+    /// <summary>获取指定 peer 的连接状态。0=Connected, 1=Disconnected, 2=Reconnecting, 3=Handshaking (正在握手), -1=不存在。</summary>
     [DllImport(DLL, CallingConvention = CC, CharSet = CS)]
     public static extern int GetPeerStatus(string peerId);
 
@@ -328,7 +329,7 @@ public static class MetaMystiaNetwork
     /// 非 Leader 调用返回 NotLeader(-6)。
     /// </summary>
     /// <param name="fromPeerId">原始发送者 ID（广播时排除此 peer）</param>
-    /// <param name="targetPeerId">目标 peer ID；传 null 或空字符串表示广播给除 from 外的所有 peer</param>
+    /// <param name="targetPeerId">目标 peer ID；传 <c>null</c>（即 C# <c>null</c> 字符串）表示广播给除 from 外的所有 peer。<b>注意：空字符串不等同于 null</b>，会被当作 peer ID 查找，将返回 PeerNotFound(-5)</param>
     [DllImport(DLL, CallingConvention = CC, CharSet = CS)]
     public static extern int ForwardMessage(string fromPeerId, string targetPeerId, byte[] data, int length, ushort msgType, byte flags);
 
@@ -383,18 +384,30 @@ public static class MetaMystiaNetwork
 
 ## 4. 使用约束（必读）
 
-| 约束                            | 说明                                                                                                                                                  |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **CallingConvention.Cdecl**     | 每个 `DllImport` 必须指定。Rust `extern "C"` = Cdecl，P/Invoke 默认 StdCall（Windows），不匹配导致栈损坏崩溃。                                        |
-| **字符串指针即用即拷**          | `GetLocalAddr()` 等返回的 `IntPtr` 仅在下一次返回字符串的 FFI 调用前有效。立即用 `PtrToString()` 拷贝。                                               |
-| **回调内禁止调 FFI**            | 回调在 Rust 线程触发（非 Unity 主线程）。回调内不得调用任何 FFI 函数（如 `SendToPeer`），否则死锁。将事件入队 `ConcurrentQueue`，由 `Update()` 消费。 |
-| **回调内同步拷贝数据**          | 回调参数的指针（`peerId`、`data`）在回调返回后被 Rust 释放。必须在回调体内完成 `Marshal.PtrToStringAnsi()` 和 `Marshal.Copy()`。                      |
-| **保持委托引用**                | 传给 `Register*Callback` 的委托必须保存为 **静态字段**，防止 GC 回收导致野指针崩溃。                                                                  |
-| **`[AOT.MonoPInvokeCallback]`** | IL2CPP 要求所有从 native 调用的回调方法标记此特性，否则 AOT 编译不生成跳板代码。                                                                      |
-| **布尔用 byte**                 | 所有布尔语义参数/返回值为 `byte`（0/1），不要用 C# `bool`。                                                                                           |
-| **msg_type ≥ 0x0100**           | 用户消息类型必须 ≥ 256。0x0001-0x00FF 为内部协议保留。                                                                                                |
-| **flags bit 0 保留**            | `flags` 的 bit 0 由库管理（LZ4 压缩），用户使用 bit 1-7。                                                                                             |
-| **不并发调字符串 FFI**          | 返回 `IntPtr` 的函数不要在多线程同时调用。                                                                                                            |
+| 约束                        | 说明                                                                                                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CallingConvention.Cdecl** | 每个 `DllImport` 必须指定。Rust `extern "C"` = Cdecl，P/Invoke 默认 StdCall（Windows），不匹配导致栈损坏崩溃。                                        |
+| **字符串指针即用即拷**      | `GetLocalAddr()` 等返回的 `IntPtr` 仅在下一次返回字符串的 FFI 调用前有效。立即用 `PtrToString()` 拷贝。                                               |
+| **回调内禁止调 FFI**        | 回调在 Rust 线程触发（非 Unity 主线程）。回调内不得调用任何 FFI 函数（如 `SendToPeer`），否则死锁。将事件入队 `ConcurrentQueue`，由 `Update()` 消费。 |
+| **回调内同步拷贝数据**      | 回调参数的指针（`peerId`、`data`）在回调返回后被 Rust 释放。必须在回调体内完成 `Marshal.PtrToStringAnsi()` 和 `Marshal.Copy()`。                      |
+
+| **PeerStatus 值范围** | `PeerStatusCallback` 返回的状态是 0=Connected、1=Disconnected、2=Reconnecting、3=Handshaking（握手中）。请在 C# 枚举中保持一致。 |
+| **保持委托引用** | 传给 `Register*Callback` 的委托必须保存为 **静态字段**，防止 GC 回收导致野指针崩溃。 |
+| **`[AOT.MonoPInvokeCallback]`** | IL2CPP 要求所有从 native 调用的回调方法标记此特性，否则 AOT 编译不生成跳板代码。 |
+| **布尔用 byte** | 所有布尔语义参数/返回值为 `byte`（0/1），不要用 C# `bool`。 |
+| **msg_type ≥ 0x0100** | 用户消息类型必须 ≥ 256。0x0001-0x00FF 为内部协议保留。 |
+| **flags bit 0 保留** | `flags` 的 bit 0 由库管理（LZ4 压缩），用户使用 bit 1-7。 |
+| **不并发调字符串 FFI** | 返回 `IntPtr` 的函数不要在多线程同时调用。 |
+
+## 快速映射（常用 FFI 调用与行为提醒）
+
+- `InitializeNetwork` / `InitializeNetworkWithConfig`：创建 runtime 并启动所有子系统；调用成功后才可调用其余接口。
+- `ConnectToPeer(addr)`：异步入队，实际成功/失败通过 `RegisterConnectionResultCallback` 的回调通知。
+- `BroadcastMessage` / `SendToPeer`：函数会验证 `msgType >= 0x0100`、长度上限并清除 `flags` 的 bit0；若队列满返回 `SendQueueFull`。
+- `SendFromLeader` / `ForwardMessage`：仅在本节点为 Leader 时生效，非 Leader 调用返回 `NotLeader`。
+- 字符串返回：`GetLocalAddr`、`GetPeerList` 等返回的 `IntPtr` 在下一次返回字符串前有效，务必立即 `Marshal.PtrToStringAnsi()` 并保存结果。
+
+（在 C# 示例与绑定实现中应把这些行为当作契约进行实现和测试。）
 
 ---
 
