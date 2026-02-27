@@ -15,9 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{
-    HANDSHAKE_TIMEOUT_MS, MAX_CONNECTIONS, MAX_MESSAGE_SIZE, NetworkConfig, PROTOCOL_VERSION,
-};
+use crate::config::{NetworkConfig, PROTOCOL_VERSION};
 use crate::error::NetworkError;
 use crate::messaging::{RawPacket, decode_internal, encode_internal};
 use crate::protocol::InternalMessage;
@@ -32,10 +30,8 @@ pub struct PacketCodec {
 }
 
 impl PacketCodec {
-    pub fn new() -> Self {
-        Self {
-            max_message_size: MAX_MESSAGE_SIZE,
-        }
+    pub fn new(max_message_size: u32) -> Self {
+        Self { max_message_size }
     }
 }
 
@@ -74,6 +70,9 @@ impl Encoder<RawPacket> for PacketCodec {
     type Error = NetworkError;
 
     fn encode(&mut self, item: RawPacket, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        if item.payload.len() > self.max_message_size as usize {
+            return Err(NetworkError::MessageTooLarge(item.payload.len() as u32));
+        }
         let length = item.payload.len() as u32;
         dst.reserve(7 + item.payload.len());
         dst.put_u32(length);
@@ -173,7 +172,7 @@ impl TransportManager {
 
     /// Task run by `new()` that accepts inbound TCP sockets and
     /// spawns a handler for each. Respects the shutdown token and
-    /// honour the `MAX_CONNECTIONS` limit.
+    /// honour the `max_connections` config limit.
     async fn accept_loop(self: &Arc<Self>, listener: TcpListener) {
         loop {
             tokio::select! {
@@ -181,7 +180,7 @@ impl TransportManager {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
-                            if self.connections.read().len() >= MAX_CONNECTIONS {
+                            if self.connections.read().len() >= self.config.max_connections {
                                 tracing::warn!(%addr, "max connections reached, rejecting");
                                 continue;
                             }
@@ -230,10 +229,10 @@ impl TransportManager {
     ) -> Result<(), NetworkError> {
         Self::configure_keepalive(&stream)?;
 
-        let mut framed = Framed::new(stream, PacketCodec::new());
+        let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
 
         let handshake_result = tokio::time::timeout(
-            Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
+            Duration::from_millis(self.config.handshake_timeout_ms),
             self.receive_handshake(&mut framed),
         )
         .await;
@@ -241,8 +240,22 @@ impl TransportManager {
         match handshake_result {
             Ok(Ok((peer_id, listen_port, notify_packet))) => {
                 let peer_addr = SocketAddr::new(addr.ip(), listen_port);
-                self.register_connection(peer_id.clone(), peer_addr, framed)?;
-                let _ = self.incoming_tx.send((peer_id, notify_packet)).await;
+                match self.register_connection(peer_id.clone(), peer_addr, framed) {
+                    Ok(()) => {
+                        let _ = self.incoming_tx.send((peer_id, notify_packet)).await;
+                        Ok(())
+                    }
+                    Err(NetworkError::DuplicatePeerId(id)) => {
+                        // TOCTOU: another path registered this peer between
+                        // receive_handshake check and register_connection.
+                        tracing::debug!(peer = %id, "inbound TOCTOU duplicate, keeping existing");
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Ok(Err(NetworkError::AlreadyConnected(ref pid))) => {
+                tracing::debug!(%addr, peer = %pid, "inbound connection from already-connected peer, keeping existing");
                 Ok(())
             }
             Ok(Err(e)) => Err(e),
@@ -277,14 +290,17 @@ impl TransportManager {
                 session_id,
             } => {
                 if protocol_version != PROTOCOL_VERSION {
-                    let ack = encode_internal(&InternalMessage::HandshakeAck {
-                        peer_id: self.local_peer_id.as_str().to_owned(),
-                        listen_port: self.listener_addr.port(),
-                        success: false,
-                        error_reason: Some(format!(
-                            "version_mismatch: expected {PROTOCOL_VERSION}, got {protocol_version}"
-                        )),
-                    })?;
+                    let ack = encode_internal(
+                        &InternalMessage::HandshakeAck {
+                            peer_id: self.local_peer_id.as_str().to_owned(),
+                            listen_port: self.listener_addr.port(),
+                            success: false,
+                            error_reason: Some(format!(
+                                "version_mismatch: expected {PROTOCOL_VERSION}, got {protocol_version}"
+                            )),
+                        },
+                        self.config.max_message_size,
+                    )?;
                     let _ = framed.send(ack).await;
                     return Err(NetworkError::VersionMismatch {
                         expected: PROTOCOL_VERSION,
@@ -293,12 +309,15 @@ impl TransportManager {
                 }
 
                 if session_id != self.session_id {
-                    let ack = encode_internal(&InternalMessage::HandshakeAck {
-                        peer_id: self.local_peer_id.as_str().to_owned(),
-                        listen_port: self.listener_addr.port(),
-                        success: false,
-                        error_reason: Some("session_mismatch".into()),
-                    })?;
+                    let ack = encode_internal(
+                        &InternalMessage::HandshakeAck {
+                            peer_id: self.local_peer_id.as_str().to_owned(),
+                            listen_port: self.listener_addr.port(),
+                            success: false,
+                            error_reason: Some("session_mismatch".into()),
+                        },
+                        self.config.max_message_size,
+                    )?;
                     let _ = framed.send(ack).await;
                     return Err(NetworkError::SessionMismatch {
                         expected: self.session_id.clone(),
@@ -308,39 +327,54 @@ impl TransportManager {
 
                 let pid = PeerId::new(&peer_id);
                 if self.connections.read().contains_key(&pid) {
-                    let ack = encode_internal(&InternalMessage::HandshakeAck {
-                        peer_id: self.local_peer_id.as_str().to_owned(),
-                        listen_port: self.listener_addr.port(),
-                        success: false,
-                        error_reason: Some("duplicate_peer_id".into()),
-                    })?;
+                    // The peer is already connected (likely via mDNS auto-connect).
+                    // Send success so the remote side does not treat this as an error,
+                    // then return AlreadyConnected so the caller discards the duplicate
+                    // TCP stream while keeping the existing connection alive.
+                    let ack = encode_internal(
+                        &InternalMessage::HandshakeAck {
+                            peer_id: self.local_peer_id.as_str().to_owned(),
+                            listen_port: self.listener_addr.port(),
+                            success: true,
+                            error_reason: Some("already_connected".into()),
+                        },
+                        self.config.max_message_size,
+                    )?;
                     let _ = framed.send(ack).await;
-                    return Err(NetworkError::DuplicatePeerId(peer_id));
+                    return Err(NetworkError::AlreadyConnected(peer_id));
                 }
 
-                let ack = encode_internal(&InternalMessage::HandshakeAck {
-                    peer_id: self.local_peer_id.as_str().to_owned(),
-                    listen_port: self.listener_addr.port(),
-                    success: true,
-                    error_reason: None,
-                })?;
+                let ack = encode_internal(
+                    &InternalMessage::HandshakeAck {
+                        peer_id: self.local_peer_id.as_str().to_owned(),
+                        listen_port: self.listener_addr.port(),
+                        success: true,
+                        error_reason: None,
+                    },
+                    self.config.max_message_size,
+                )?;
                 framed.send(ack).await.map_err(|e| {
                     NetworkError::ConnectionFailed(format!("failed to send handshake ack: {e}"))
                 })?;
 
                 let peer_list = self.get_peer_list_for_sync();
                 if !peer_list.is_empty() {
-                    let sync_msg =
-                        encode_internal(&InternalMessage::PeerListSync { peers: peer_list })?;
+                    let sync_msg = encode_internal(
+                        &InternalMessage::PeerListSync { peers: peer_list },
+                        self.config.max_message_size,
+                    )?;
                     let _ = framed.send(sync_msg).await;
                 }
 
-                let notify_packet = encode_internal(&InternalMessage::Handshake {
-                    peer_id: peer_id.clone(),
-                    listen_port,
-                    protocol_version,
-                    session_id,
-                })?;
+                let notify_packet = encode_internal(
+                    &InternalMessage::Handshake {
+                        peer_id: peer_id.clone(),
+                        listen_port,
+                        protocol_version,
+                        session_id,
+                    },
+                    self.config.max_message_size,
+                )?;
 
                 Ok((pid, listen_port, notify_packet))
             }
@@ -354,7 +388,7 @@ impl TransportManager {
     /// perform the handshake protocol. On success the new peer's
     /// `PeerId` is returned and the connection is registered.
     pub async fn connect_to(self: &Arc<Self>, addr: &str) -> Result<PeerId, NetworkError> {
-        if self.connections.read().len() >= MAX_CONNECTIONS {
+        if self.connections.read().len() >= self.config.max_connections {
             return Err(NetworkError::MaxConnectionsReached);
         }
 
@@ -363,7 +397,7 @@ impl TransportManager {
             .map_err(|e| NetworkError::InvalidArgument(format!("invalid address: {e}")))?;
 
         let stream = tokio::time::timeout(
-            Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
+            Duration::from_millis(self.config.handshake_timeout_ms),
             TcpStream::connect(socket_addr),
         )
         .await
@@ -372,21 +406,24 @@ impl TransportManager {
 
         Self::configure_keepalive(&stream)?;
 
-        let mut framed = Framed::new(stream, PacketCodec::new());
+        let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
 
-        let handshake = encode_internal(&InternalMessage::Handshake {
-            peer_id: self.local_peer_id.as_str().to_owned(),
-            listen_port: self.listener_addr.port(),
-            protocol_version: PROTOCOL_VERSION,
-            session_id: self.session_id.clone(),
-        })?;
+        let handshake = encode_internal(
+            &InternalMessage::Handshake {
+                peer_id: self.local_peer_id.as_str().to_owned(),
+                listen_port: self.listener_addr.port(),
+                protocol_version: PROTOCOL_VERSION,
+                session_id: self.session_id.clone(),
+            },
+            self.config.max_message_size,
+        )?;
 
         framed.send(handshake).await.map_err(|e| {
             NetworkError::ConnectionFailed(format!("failed to send handshake: {e}"))
         })?;
 
         let ack_result = tokio::time::timeout(
-            Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
+            Duration::from_millis(self.config.handshake_timeout_ms),
             self.receive_handshake_ack(&mut framed),
         )
         .await;
@@ -394,12 +431,26 @@ impl TransportManager {
         match ack_result {
             Ok(Ok((peer_id, listen_port, notify_packet))) => {
                 let peer_addr = SocketAddr::new(socket_addr.ip(), listen_port);
-                self.register_connection(peer_id.clone(), peer_addr, framed)?;
-                let _ = self
-                    .incoming_tx
-                    .send((peer_id.clone(), notify_packet))
-                    .await;
-                Ok(peer_id)
+                match self.register_connection(peer_id.clone(), peer_addr, framed) {
+                    Ok(()) => {
+                        let _ = self
+                            .incoming_tx
+                            .send((peer_id.clone(), notify_packet))
+                            .await;
+                        Ok(peer_id)
+                    }
+                    Err(NetworkError::DuplicatePeerId(id)) => {
+                        // TOCTOU: another path registered this peer between
+                        // handshake and register_connection. Treat as already connected.
+                        Err(NetworkError::AlreadyConnected(id))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Ok(Err(NetworkError::AlreadyConnected(pid))) => {
+                // Remote says we are already connected — return the existing peer_id.
+                tracing::debug!(peer = %pid, "connect_to: peer already connected via another path");
+                Err(NetworkError::AlreadyConnected(pid))
             }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(NetworkError::HandshakeTimeout),
@@ -429,16 +480,27 @@ impl TransportManager {
             } => {
                 if !success {
                     let reason = error_reason.unwrap_or_else(|| "unknown".into());
+                    if reason == "duplicate_peer_id" {
+                        return Err(NetworkError::AlreadyConnected(peer_id));
+                    }
                     return Err(NetworkError::HandshakeFailed(reason));
+                }
+                // success=true with "already_connected" hint means the
+                // remote already has a connection from us (e.g. via mDNS).
+                if error_reason.as_deref() == Some("already_connected") {
+                    return Err(NetworkError::AlreadyConnected(peer_id));
                 }
                 let pid = PeerId::new(&peer_id);
 
-                let notify_packet = encode_internal(&InternalMessage::HandshakeAck {
-                    peer_id,
-                    listen_port,
-                    success: true,
-                    error_reason: None,
-                })?;
+                let notify_packet = encode_internal(
+                    &InternalMessage::HandshakeAck {
+                        peer_id,
+                        listen_port,
+                        success: true,
+                        error_reason: None,
+                    },
+                    self.config.max_message_size,
+                )?;
 
                 Ok((pid, listen_port, notify_packet))
             }
@@ -651,9 +713,12 @@ impl TransportManager {
     /// message and cancelling its tasks. The peer is removed from
     /// the internal map but may reconnect if allowed.
     pub fn disconnect_peer(&self, peer_id: &PeerId) -> Result<(), NetworkError> {
-        let leave_msg = encode_internal(&InternalMessage::PeerLeave {
-            peer_id: self.local_peer_id.as_str().to_owned(),
-        })?;
+        let leave_msg = encode_internal(
+            &InternalMessage::PeerLeave {
+                peer_id: self.local_peer_id.as_str().to_owned(),
+            },
+            self.config.max_message_size,
+        )?;
         if let Err(e) = self.send_to_peer(peer_id, leave_msg) {
             tracing::debug!(peer = %peer_id, error = %e, "failed to send PeerLeave during disconnect");
         }
@@ -672,9 +737,12 @@ impl TransportManager {
     /// Broadcast a `PeerLeave` internal message to all connected
     /// peers, used during shutdown.
     pub fn broadcast_peer_leave(&self) {
-        match encode_internal(&InternalMessage::PeerLeave {
-            peer_id: self.local_peer_id.as_str().to_owned(),
-        }) {
+        match encode_internal(
+            &InternalMessage::PeerLeave {
+                peer_id: self.local_peer_id.as_str().to_owned(),
+            },
+            self.config.max_message_size,
+        ) {
             Ok(packet) => {
                 self.broadcast(packet, None);
             }
@@ -793,11 +861,26 @@ impl TransportManager {
 mod tests {
     use super::*;
 
+    use crate::config::NetworkConfig;
+
     use bytes::Bytes;
+
+    /// Create a TransportManager for testing.
+    async fn make_transport(
+        peer_id: &str,
+        session_id: &str,
+    ) -> (Arc<TransportManager>, mpsc::Receiver<(PeerId, RawPacket)>) {
+        let config = NetworkConfig::default();
+        let token = CancellationToken::new();
+        TransportManager::new(PeerId::new(peer_id), session_id.into(), config, token)
+            .await
+            .unwrap()
+    }
 
     #[test]
     fn test_packet_codec_framing() {
-        let mut codec = PacketCodec::new();
+        let cfg = NetworkConfig::default();
+        let mut codec = PacketCodec::new(cfg.max_message_size);
         let mut buf = BytesMut::new();
 
         let packet = RawPacket {
@@ -815,7 +898,8 @@ mod tests {
 
     #[test]
     fn test_packet_codec_partial() {
-        let mut codec = PacketCodec::new();
+        let cfg = NetworkConfig::default();
+        let mut codec = PacketCodec::new(cfg.max_message_size);
         let mut buf = BytesMut::new();
 
         let packet = RawPacket {
@@ -837,7 +921,7 @@ mod tests {
         assert_eq!(decoded.payload, vec![10, 20, 30]);
 
         // Case 2: header complete but payload incomplete
-        let mut codec2 = PacketCodec::new();
+        let mut codec2 = PacketCodec::new(cfg.max_message_size);
         let mut buf2 = BytesMut::new();
         let packet2 = RawPacket {
             msg_type: 0x0200,
@@ -859,7 +943,7 @@ mod tests {
 
     #[test]
     fn test_packet_codec_multiple() {
-        let mut codec = PacketCodec::new();
+        let mut codec = PacketCodec::new(NetworkConfig::default().max_message_size);
         let mut buf = BytesMut::new();
 
         for i in 0u8..3 {
@@ -883,13 +967,76 @@ mod tests {
 
     #[test]
     fn test_packet_codec_too_large() {
-        let mut codec = PacketCodec::new();
+        let max = NetworkConfig::default().max_message_size;
+        let mut codec = PacketCodec::new(max);
         let mut buf = BytesMut::new();
-        buf.put_u32(MAX_MESSAGE_SIZE + 1);
+        buf.put_u32(max + 1);
         buf.put_u16(0x0100);
         buf.put_u8(0);
 
         let result = codec.decode(&mut buf);
         assert!(matches!(result, Err(NetworkError::MessageTooLarge(_))));
+    }
+
+    /// Inbound path: when peer_a is already connected to peer_b and
+    /// peer_b opens a second TCP connection to peer_a, the server
+    /// side (peer_a) should detect the duplicate in `receive_handshake`
+    /// and return `AlreadyConnected` — the existing connection is
+    /// kept intact.
+    #[tokio::test]
+    async fn test_already_connected_inbound() {
+        let (tm_a, _rx_a) = make_transport("peer_a", "session").await;
+        let (tm_b, _rx_b) = make_transport("peer_b", "session").await;
+
+        // First connection: b → a (normal success)
+        let addr_a = format!("127.0.0.1:{}", tm_a.listener_addr().port());
+        tm_b.connect_to(&addr_a).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Both sides should see each other
+        assert!(tm_a.has_peer(&PeerId::new("peer_b")));
+        assert!(tm_b.has_peer(&PeerId::new("peer_a")));
+
+        // Second connection: b → a again — should get AlreadyConnected
+        let result = tm_b.connect_to(&addr_a).await;
+        assert!(
+            matches!(result, Err(NetworkError::AlreadyConnected(ref id)) if id == "peer_a"),
+            "expected AlreadyConnected, got: {result:?}"
+        );
+
+        // Original connection still alive
+        assert!(tm_a.has_peer(&PeerId::new("peer_b")));
+        assert!(tm_b.has_peer(&PeerId::new("peer_a")));
+    }
+
+    /// Outbound path: when peer_a connects to peer_b which already
+    /// has peer_a registered, peer_b's `receive_handshake` sends
+    /// `HandshakeAck(success=true, "already_connected")` and the
+    /// caller (`connect_to`) surfaces `AlreadyConnected`.
+    #[tokio::test]
+    async fn test_already_connected_outbound() {
+        let (tm_a, _rx_a) = make_transport("peer_a", "session").await;
+        let (tm_b, _rx_b) = make_transport("peer_b", "session").await;
+
+        // First connection: a → b
+        let addr_b = format!("127.0.0.1:{}", tm_b.listener_addr().port());
+        tm_a.connect_to(&addr_b).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(tm_a.has_peer(&PeerId::new("peer_b")));
+        assert!(tm_b.has_peer(&PeerId::new("peer_a")));
+
+        // Now peer_a opens a second outbound connection to peer_b.
+        // peer_b already has peer_a registered, so it sends
+        // success=true + "already_connected" in HandshakeAck.
+        let result = tm_a.connect_to(&addr_b).await;
+        assert!(
+            matches!(result, Err(NetworkError::AlreadyConnected(ref id)) if id == "peer_b"),
+            "expected AlreadyConnected, got: {result:?}"
+        );
+
+        // Existing connection unaffected
+        assert_eq!(tm_a.connection_count(), 1);
+        assert_eq!(tm_b.connection_count(), 1);
     }
 }

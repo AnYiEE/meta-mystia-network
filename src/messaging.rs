@@ -3,7 +3,6 @@
 
 use bytes::Bytes;
 
-use crate::config::MAX_MESSAGE_SIZE;
 use crate::error::NetworkError;
 use crate::protocol::{InternalMessage, msg_types};
 
@@ -46,6 +45,7 @@ pub fn encode_packet(
     data: &[u8],
     user_flags: u8,
     compression_threshold: u32,
+    max_message_size: u32,
 ) -> Result<RawPacket, NetworkError> {
     // enforce user message range; internal messages use
     // `encode_internal`.
@@ -55,7 +55,7 @@ pub fn encode_packet(
         ));
     }
 
-    if data.len() as u32 > MAX_MESSAGE_SIZE {
+    if data.len() as u32 > max_message_size {
         return Err(NetworkError::MessageTooLarge(data.len() as u32));
     }
 
@@ -95,10 +95,13 @@ pub fn decode_payload(packet: &RawPacket) -> Result<Bytes, NetworkError> {
 /// Serialize one of the internal protocol messages into a
 /// `RawPacket` with an appropriate `msg_type` code. Internal
 /// packets are never compressed and always use flag=0.
-pub fn encode_internal(msg: &InternalMessage) -> Result<RawPacket, NetworkError> {
+pub fn encode_internal(
+    msg: &InternalMessage,
+    max_message_size: u32,
+) -> Result<RawPacket, NetworkError> {
     let payload = postcard::to_allocvec(msg)?;
 
-    if payload.len() as u32 > MAX_MESSAGE_SIZE {
+    if payload.len() as u32 > max_message_size {
         return Err(NetworkError::MessageTooLarge(payload.len() as u32));
     }
 
@@ -134,10 +137,20 @@ pub fn decode_internal(packet: &RawPacket) -> Result<InternalMessage, NetworkErr
 mod tests {
     use super::*;
 
+    use crate::config::NetworkConfig;
+
     #[test]
     fn test_packet_encode_decode() {
+        let cfg = NetworkConfig::default();
         let data = b"hello world";
-        let packet = encode_packet(0x0100, data, 0, 512).unwrap();
+        let packet = encode_packet(
+            0x0100,
+            data,
+            0,
+            cfg.compression_threshold,
+            cfg.max_message_size,
+        )
+        .unwrap();
         assert_eq!(packet.msg_type, 0x0100);
         assert!(!packet.is_compressed());
         let decoded = decode_payload(&packet).unwrap();
@@ -146,8 +159,16 @@ mod tests {
 
     #[test]
     fn test_packet_compression() {
+        let cfg = NetworkConfig::default();
         let data = vec![0x42; 2048];
-        let packet = encode_packet(0x0100, &data, 0, 512).unwrap();
+        let packet = encode_packet(
+            0x0100,
+            &data,
+            0,
+            cfg.compression_threshold,
+            cfg.max_message_size,
+        )
+        .unwrap();
         assert!(packet.is_compressed());
         assert!(packet.payload.len() < data.len());
         let decoded = decode_payload(&packet).unwrap();
@@ -156,11 +177,19 @@ mod tests {
 
     #[test]
     fn test_compression_not_beneficial() {
+        let cfg = NetworkConfig::default();
         // Random-like data that LZ4 cannot compress effectively
         let data: Vec<u8> = (0u32..600)
             .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
             .collect();
-        let packet = encode_packet(0x0100, &data, 0, 512).unwrap();
+        let packet = encode_packet(
+            0x0100,
+            &data,
+            0,
+            cfg.compression_threshold,
+            cfg.max_message_size,
+        )
+        .unwrap();
         // LZ4 compressed output is larger than input for random data, so no compression
         assert!(
             !packet.is_compressed(),
@@ -172,22 +201,56 @@ mod tests {
 
     #[test]
     fn test_user_msg_type_validation() {
-        let result = encode_packet(0x0001, b"test", 0, 512);
+        let cfg = NetworkConfig::default();
+        let result = encode_packet(
+            0x0001,
+            b"test",
+            0,
+            cfg.compression_threshold,
+            cfg.max_message_size,
+        );
         assert!(result.is_err());
-        let result = encode_packet(0x00FF, b"test", 0, 512);
+        let result = encode_packet(
+            0x00FF,
+            b"test",
+            0,
+            cfg.compression_threshold,
+            cfg.max_message_size,
+        );
         assert!(result.is_err());
-        let result = encode_packet(0x0100, b"test", 0, 512);
+        let result = encode_packet(
+            0x0100,
+            b"test",
+            0,
+            cfg.compression_threshold,
+            cfg.max_message_size,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_flags_compression_bit() {
-        let packet = encode_packet(0x0100, b"small", 0b1111_1111, 512).unwrap();
+        let cfg = NetworkConfig::default();
+        let packet = encode_packet(
+            0x0100,
+            b"small",
+            0b1111_1111,
+            cfg.compression_threshold,
+            cfg.max_message_size,
+        )
+        .unwrap();
         assert_eq!(packet.flags & 0x01, 0);
         assert_eq!(packet.flags & 0xFE, 0xFE);
 
         let data = vec![0x42; 2048];
-        let packet = encode_packet(0x0100, &data, 0b0000_0110, 512).unwrap();
+        let packet = encode_packet(
+            0x0100,
+            &data,
+            0b0000_0110,
+            cfg.compression_threshold,
+            cfg.max_message_size,
+        )
+        .unwrap();
         assert!(packet.is_compressed(), "2048 bytes of 0x42 should compress");
         assert_eq!(packet.flags & 0x01, 0x01);
         assert_eq!(packet.flags & 0xFE, 0b0000_0110);
@@ -195,27 +258,34 @@ mod tests {
 
     #[test]
     fn test_message_too_large() {
-        let data = vec![0; MAX_MESSAGE_SIZE as usize + 1];
-        let result = encode_packet(0x0100, &data, 0, 512);
+        let cfg = NetworkConfig::default();
+        let max = cfg.max_message_size;
+        let data = vec![0; max as usize + 1];
+        let result = encode_packet(0x0100, &data, 0, cfg.compression_threshold, max);
         assert!(matches!(result, Err(NetworkError::MessageTooLarge(_))));
     }
 
     #[test]
     fn test_large_message_near_limit() {
-        let data = vec![0x42; MAX_MESSAGE_SIZE as usize];
-        let packet = encode_packet(0x0100, &data, 0, MAX_MESSAGE_SIZE + 1).unwrap();
+        let cfg = NetworkConfig::default();
+        let max = cfg.max_message_size;
+        let data = vec![0x42; max as usize];
+        let packet = encode_packet(0x0100, &data, 0, max + 1, max).unwrap();
         let decoded = decode_payload(&packet).unwrap();
         assert_eq!(&decoded[..], &data[..]);
     }
 
     #[test]
     fn test_compression_threshold_boundary() {
-        let data = vec![0xAA; 512];
-        let packet_at = encode_packet(0x0100, &data, 0, 512).unwrap();
+        let cfg = NetworkConfig::default();
+        let thresh = cfg.compression_threshold;
+        let max = cfg.max_message_size;
+        let data = vec![0xAA; thresh as usize];
+        let packet_at = encode_packet(0x0100, &data, 0, thresh, max).unwrap();
         assert!(!packet_at.is_compressed());
 
-        let data = vec![0xAA; 513];
-        let packet_above = encode_packet(0x0100, &data, 0, 512).unwrap();
+        let data = vec![0xAA; thresh as usize + 1];
+        let packet_above = encode_packet(0x0100, &data, 0, thresh, max).unwrap();
         assert!(
             packet_above.is_compressed(),
             "data above threshold should be compressed when beneficial"
@@ -226,6 +296,7 @@ mod tests {
 
     #[test]
     fn test_internal_message_serde() {
+        let max = NetworkConfig::default().max_message_size;
         let messages = vec![
             InternalMessage::Handshake {
                 peer_id: "peer1".into(),
@@ -283,10 +354,10 @@ mod tests {
         ];
 
         for msg in &messages {
-            let packet = encode_internal(msg).unwrap();
+            let packet = encode_internal(msg, max).unwrap();
             assert!(packet.is_internal());
             let decoded = decode_internal(&packet).unwrap();
-            let re_encoded = encode_internal(&decoded).unwrap();
+            let re_encoded = encode_internal(&decoded, max).unwrap();
             assert_eq!(packet.payload, re_encoded.payload);
             assert_eq!(packet.msg_type, re_encoded.msg_type);
         }

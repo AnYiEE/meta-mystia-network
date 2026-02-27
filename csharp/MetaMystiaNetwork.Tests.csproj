@@ -8,6 +8,10 @@
     <Nullable>enable</Nullable>
     <WarningLevel>5</WarningLevel>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Exclude PeerHelper sub-project from this compilation -->
+    <Compile Remove="PeerHelper\**" />
+  </ItemGroup>
   <Target Name="BuildAndCopyRust" BeforeTargets="Build">
     <!-- invoke cargo and copy resulting library into output directory -->
     <Exec Command="cargo build --release --manifest-path ..\Cargo.toml" />

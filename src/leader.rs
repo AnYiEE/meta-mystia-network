@@ -4,10 +4,10 @@
 
 use std::collections::HashSet;
 
-use parking_lot::{Mutex, RwLock};
-use tokio::sync::{broadcast, mpsc};
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
 
-use crate::membership::MembershipEvent;
+use crate::config::ManualOverrideRecovery;
 use crate::types::PeerId;
 
 /// Current state of this node in the leader election FSM.
@@ -47,21 +47,22 @@ pub struct LeaderElection {
     // shared election state
     state: RwLock<ElectionState>,
 
-    // incoming membership change stream
-    membership_rx: Mutex<broadcast::Receiver<MembershipEvent>>,
-
     // outgoing notifications when leader changes (Some(id) or None)
     leader_change_tx: mpsc::Sender<Option<PeerId>>,
+
+    // what to do when a manually-assigned leader goes offline
+    manual_override_recovery: ManualOverrideRecovery,
 }
 
 impl LeaderElection {
     /// Construct a new election instance. Needs the local ID, a
-    /// flag indicating whether automatic elections are desired, and
-    /// channels for membership updates and leader notifications.
+    /// flag indicating whether automatic elections are desired, the
+    /// recovery strategy for manual override, and a channel for
+    /// leader change notifications.
     pub fn new(
         local_peer_id: PeerId,
         auto_election_enabled: bool,
-        membership_rx: broadcast::Receiver<MembershipEvent>,
+        manual_override_recovery: ManualOverrideRecovery,
         leader_change_tx: mpsc::Sender<Option<PeerId>>,
     ) -> Self {
         Self {
@@ -75,8 +76,8 @@ impl LeaderElection {
                 auto_election_enabled,
                 manual_override: false,
             }),
-            membership_rx: Mutex::new(membership_rx),
             leader_change_tx,
+            manual_override_recovery,
         }
     }
 
@@ -213,10 +214,26 @@ impl LeaderElection {
 
     /// Process a heartbeat message from the current leader. Returns
     /// `true` if the term is valid and the heartbeat was accepted.
+    ///
+    /// When `manual_override` is active, heartbeats from a leader
+    /// that differs from the manually-assigned leader are silently
+    /// **rejected**. This prevents automatic elections from
+    /// overriding a manually-chosen host.
     pub fn handle_heartbeat(&self, term: u64, leader_id: &str) -> bool {
         let mut state = self.state.write();
 
         if term < state.current_term {
+            return false;
+        }
+
+        // When manually assigned, only accept heartbeats from the
+        // same leader to prevent automatic takeover.
+        if state.manual_override
+            && state
+                .leader_id
+                .as_ref()
+                .is_some_and(|current| current.as_str() != leader_id)
+        {
             return false;
         }
 
@@ -325,41 +342,49 @@ impl LeaderElection {
 
     /// Notify the election module that a peer has left, which may
     /// influence quorum counting.
+    ///
+    /// When the departing peer is the current leader and
+    /// `manual_override` is active, the configured
+    /// [`ManualOverrideRecovery`] strategy determines what happens:
+    /// - **Hold** – keep `manual_override`, do NOT start election;
+    ///   upper layer is expected to call `SetLeader` again.
+    /// - **AutoElect** – clear `manual_override` and let the
+    ///   normal election take over.
+    ///
+    /// In both cases a leader-change notification with `None` is
+    /// emitted so the application layer can react.
     pub fn handle_peer_left(&self, peer_id: &PeerId) {
         let state = self.state.read();
         if state.leader_id.as_ref() == Some(peer_id) {
+            let was_manual = state.manual_override;
             drop(state);
+
             let mut state = self.state.write();
             state.leader_id = None;
-            if state.role == Role::Follower && !state.manual_override {
+
+            if was_manual {
+                match self.manual_override_recovery {
+                    ManualOverrideRecovery::Hold => {
+                        // Keep manual_override active; upper layer decides next step.
+                        tracing::info!(
+                            peer = peer_id.as_str(),
+                            "manual leader left – holding override, waiting for upper layer"
+                        );
+                    }
+                    ManualOverrideRecovery::AutoElect => {
+                        state.manual_override = false;
+                        tracing::info!(
+                            peer = peer_id.as_str(),
+                            "manual leader left – clearing override, will auto-elect"
+                        );
+                    }
+                }
+            } else if state.role == Role::Follower {
                 // Will trigger election timeout naturally
             }
+
             drop(state);
             self.notify_leader_change(None);
-        }
-    }
-
-    /// Consume any pending membership events and update the
-    /// connected peer count accordingly. Should be called periodically
-    /// by an external driver.
-    pub fn drain_membership_events(&self, connected_peer_count: &mut usize) {
-        let mut rx = self.membership_rx.lock();
-        loop {
-            match rx.try_recv() {
-                Ok(MembershipEvent::Joined(_)) => {
-                    *connected_peer_count += 1;
-                }
-                Ok(MembershipEvent::Left(ref pid)) => {
-                    *connected_peer_count = connected_peer_count.saturating_sub(1);
-                    self.handle_peer_left(pid);
-                }
-                Ok(MembershipEvent::StatusChanged { .. }) => {}
-                Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                    tracing::warn!(n, "leader election broadcast lagged, need full sync");
-                    break;
-                }
-                Err(_) => break,
-            }
         }
     }
 
@@ -398,13 +423,23 @@ impl LeaderElection {
 mod tests {
     use super::*;
 
-    use tokio::sync::broadcast;
-
     fn create_election(peer_id: &str) -> (LeaderElection, mpsc::Receiver<Option<PeerId>>) {
-        let (event_tx, event_rx) = broadcast::channel(256);
-        let _ = event_tx;
         let (leader_tx, leader_rx) = mpsc::channel(16);
-        let election = LeaderElection::new(PeerId::new(peer_id), true, event_rx, leader_tx);
+        let election = LeaderElection::new(
+            PeerId::new(peer_id),
+            true,
+            ManualOverrideRecovery::Hold,
+            leader_tx,
+        );
+        (election, leader_rx)
+    }
+
+    fn create_election_with_recovery(
+        peer_id: &str,
+        recovery: ManualOverrideRecovery,
+    ) -> (LeaderElection, mpsc::Receiver<Option<PeerId>>) {
+        let (leader_tx, leader_rx) = mpsc::channel(16);
+        let election = LeaderElection::new(PeerId::new(peer_id), true, recovery, leader_tx);
         (election, leader_rx)
     }
 
@@ -592,5 +627,61 @@ mod tests {
         assert_eq!(election.current_term(), 5);
         assert_eq!(election.role(), Role::Follower);
         assert!(election.state.read().manual_override);
+    }
+
+    #[test]
+    fn test_heartbeat_rejects_foreign_leader_under_manual_override() {
+        let (election, _rx) = create_election("peer1");
+        // Manually assign peer2 as leader → manual_override = true
+        election.set_leader(&PeerId::new("peer2"));
+        assert!(election.state.read().manual_override);
+        assert_eq!(election.leader_id().unwrap().as_str(), "peer2");
+
+        // Heartbeat from peer3 (different leader) should be rejected
+        let accepted = election.handle_heartbeat(10, "peer3");
+        assert!(!accepted);
+        // Leader should still be peer2
+        assert_eq!(election.leader_id().unwrap().as_str(), "peer2");
+    }
+
+    #[test]
+    fn test_heartbeat_accepts_same_leader_under_manual_override() {
+        let (election, _rx) = create_election("peer1");
+        election.set_leader(&PeerId::new("peer2"));
+        assert!(election.state.read().manual_override);
+
+        // Heartbeat from the same manually-assigned leader should be accepted
+        let accepted = election.handle_heartbeat(5, "peer2");
+        assert!(accepted);
+        assert_eq!(election.leader_id().unwrap().as_str(), "peer2");
+    }
+
+    #[test]
+    fn test_peer_left_hold_recovery_keeps_manual_override() {
+        let (election, _rx) = create_election_with_recovery("peer1", ManualOverrideRecovery::Hold);
+        election.set_leader(&PeerId::new("peer2"));
+        assert!(election.state.read().manual_override);
+
+        election.handle_peer_left(&PeerId::new("peer2"));
+
+        // Leader should be cleared
+        assert!(election.leader_id().is_none());
+        // manual_override should STILL be true (Hold strategy)
+        assert!(election.state.read().manual_override);
+    }
+
+    #[test]
+    fn test_peer_left_auto_elect_recovery_clears_manual_override() {
+        let (election, _rx) =
+            create_election_with_recovery("peer1", ManualOverrideRecovery::AutoElect);
+        election.set_leader(&PeerId::new("peer2"));
+        assert!(election.state.read().manual_override);
+
+        election.handle_peer_left(&PeerId::new("peer2"));
+
+        // Leader should be cleared
+        assert!(election.leader_id().is_none());
+        // manual_override should be FALSE (AutoElect strategy)
+        assert!(!election.state.read().manual_override);
     }
 }

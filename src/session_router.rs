@@ -32,6 +32,7 @@ pub struct SessionRouter {
     centralized_mode: AtomicBool, // true when operating under leader
     centralized_auto_forward: AtomicBool, // leader behavior toggle
     compression_threshold: AtomicU32, // size at which packets compress
+    max_message_size: u32,        // maximum payload size in bytes
 }
 
 impl SessionRouter {
@@ -53,6 +54,7 @@ impl SessionRouter {
             centralized_mode: AtomicBool::new(false),
             centralized_auto_forward: AtomicBool::new(auto_forward),
             compression_threshold: AtomicU32::new(threshold),
+            max_message_size: config.max_message_size,
         }
     }
 
@@ -122,22 +124,35 @@ impl SessionRouter {
             MessageTarget::Broadcast => {
                 if self.is_centralized() && !self.is_leader() {
                     let leader = self.leader_id().ok_or(NetworkError::NotLeader)?;
-                    let fwd = encode_internal(&InternalMessage::ForwardedUserData {
-                        from_peer_id: self.local_peer_id.as_str().to_owned(),
-                        original_msg_type: msg_type,
-                        original_flags: clean_flags,
-                        payload: data.to_vec(),
-                    })?;
+                    let fwd = encode_internal(
+                        &InternalMessage::ForwardedUserData {
+                            from_peer_id: self.local_peer_id.as_str().to_owned(),
+                            original_msg_type: msg_type,
+                            original_flags: clean_flags,
+                            payload: data.to_vec(),
+                        },
+                        self.max_message_size,
+                    )?;
                     self.transport.send_to_peer(&leader, fwd)?;
                 } else {
-                    let packet =
-                        encode_packet(msg_type, data, clean_flags, self.compression_threshold())?;
+                    let packet = encode_packet(
+                        msg_type,
+                        data,
+                        clean_flags,
+                        self.compression_threshold(),
+                        self.max_message_size,
+                    )?;
                     self.transport.broadcast(packet, None);
                 }
             }
             MessageTarget::ToPeer(ref peer_id) => {
-                let packet =
-                    encode_packet(msg_type, data, clean_flags, self.compression_threshold())?;
+                let packet = encode_packet(
+                    msg_type,
+                    data,
+                    clean_flags,
+                    self.compression_threshold(),
+                    self.max_message_size,
+                )?;
                 self.transport.send_to_peer(peer_id, packet)?;
             }
             MessageTarget::ToLeader => {
@@ -145,8 +160,13 @@ impl SessionRouter {
                     return Ok(());
                 }
                 let leader = self.leader_id().ok_or(NetworkError::NotLeader)?;
-                let packet =
-                    encode_packet(msg_type, data, clean_flags, self.compression_threshold())?;
+                let packet = encode_packet(
+                    msg_type,
+                    data,
+                    clean_flags,
+                    self.compression_threshold(),
+                    self.max_message_size,
+                )?;
                 self.transport.send_to_peer(&leader, packet)?;
             }
         }
@@ -170,7 +190,13 @@ impl SessionRouter {
         }
 
         let clean_flags = user_flags & 0xFE;
-        let packet = encode_packet(msg_type, data, clean_flags, self.compression_threshold())?;
+        let packet = encode_packet(
+            msg_type,
+            data,
+            clean_flags,
+            self.compression_threshold(),
+            self.max_message_size,
+        )?;
         self.transport.broadcast(packet, None);
 
         Ok(())
@@ -194,7 +220,13 @@ impl SessionRouter {
         }
 
         let clean_flags = flags & 0xFE;
-        let packet = encode_packet(msg_type, payload, clean_flags, self.compression_threshold())?;
+        let packet = encode_packet(
+            msg_type,
+            payload,
+            clean_flags,
+            self.compression_threshold(),
+            self.max_message_size,
+        )?;
 
         match target {
             ForwardTarget::ToPeer(ref peer_id) => {
@@ -247,7 +279,6 @@ mod tests {
 
     use crate::config::NetworkConfig;
     use crate::leader::LeaderElection;
-    use crate::membership::MembershipManager;
     use crate::transport::TransportManager;
     use crate::types::PeerId;
 
@@ -262,12 +293,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let membership = Arc::new(MembershipManager::new(local.clone(), config));
         let (tx, _rx) = mpsc::channel(16);
         let leader = Arc::new(LeaderElection::new(
             local.clone(),
             false,
-            membership.event_tx.subscribe(),
+            crate::config::ManualOverrideRecovery::Hold,
             tx,
         ));
         SessionRouter::new(local, Arc::clone(&transport), Arc::clone(&leader), config)

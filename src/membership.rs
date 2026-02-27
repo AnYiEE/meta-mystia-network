@@ -243,14 +243,16 @@ mod tests {
         mgr.handle_pong(&PeerId::new("peer1"), ts);
 
         let rtt = mgr.get_peer_rtt(&PeerId::new("peer1")).unwrap();
-        assert!(rtt >= 40 && rtt <= 200);
+        assert!((40..=200).contains(&rtt));
     }
 
     #[test]
     fn test_heartbeat_timeout_detection() {
-        let mut config = NetworkConfig::default();
-        config.heartbeat_interval_ms = 10;
-        config.heartbeat_timeout_multiplier = 1;
+        let config = NetworkConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_multiplier: 1,
+            ..Default::default()
+        };
         let mgr = MembershipManager::new(PeerId::new("local"), config);
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
@@ -265,9 +267,11 @@ mod tests {
 
     #[test]
     fn test_update_last_seen_prevents_timeout() {
-        let mut config = NetworkConfig::default();
-        config.heartbeat_interval_ms = 100;
-        config.heartbeat_timeout_multiplier = 1;
+        let config = NetworkConfig {
+            heartbeat_interval_ms: 100,
+            heartbeat_timeout_multiplier: 1,
+            ..Default::default()
+        };
         let mgr = MembershipManager::new(PeerId::new("local"), config);
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 

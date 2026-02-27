@@ -111,7 +111,7 @@ MetaMystiaNetwork.ShutdownNetwork();
 | 函数                                                  | 描述                                 | 备注                                                                      |
 | ----------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------- |
 | `InitializeNetwork(peerId, sessionId)`                | 初始化网络状态，必须在首次使用前调用 | 重复调用返回 `AlreadyInitialized`；可通过 `IsNetworkInitialized` 检查     |
-| `InitializeNetworkWithConfig(peerId, sessionId, cfg)` | 使用自定义配置初始化                 | `cfg` 不能为空指针；结构体大小须为 64 字节且字段顺序与 Rust 端对齐        |
+| `InitializeNetworkWithConfig(peerId, sessionId, cfg)` | 使用自定义配置初始化                 | `cfg` 不能为空指针；结构体大小须为 80 字节且字段顺序与 Rust 端对齐        |
 | `ShutdownNetwork()`                                   | 关闭并清理所有资源                   | 未初始化时调用返回 `NotInitialized`；关闭后可重新调用 `InitializeNetwork` |
 | `IsNetworkInitialized()`                              | 已初始化返回 `1`，否则返回 `0`       |                                                                           |
 | `GetLastErrorCode()` / `GetLastErrorMessage()`        | 获取最近一次调用失败的错误码和描述   | 消息字符串有效期至下一次字符串返回前                                      |
@@ -171,32 +171,38 @@ MetaMystiaNetwork.ShutdownNetwork();
 
 ## 🧩 配置与默认值
 
-默认采用 `NetworkConfig::default()`，对应 C# 的 `NetworkConfigFFI.Default()`，一般无需修改。`NetworkConfigFFI` 的内存布局必须与 Rust 端完全一致，结构体总大小为 **64 字节**：
+默认采用 `NetworkConfig::default()`，对应 C# 的 `NetworkConfigFFI.Default()`，一般无需修改。`NetworkConfigFFI` 的内存布局必须与 Rust 端完全一致，结构体总大小为 **80 字节**：
 
 ```c
-// 总大小 64 字节（含编译器隐式对齐填充，详见 #[repr(C)] 布局）
+// 总大小 80 字节（含编译器隐式对齐填充，详见 #[repr(C)] 布局）
 struct NetworkConfigFFI {
-    uint64_t heartbeat_interval_ms;        // 默认 500
-    uint64_t election_timeout_min_ms;      // 默认 1500
-    uint64_t election_timeout_max_ms;      // 默认 3000
-    uint32_t heartbeat_timeout_multiplier; // 默认 3
-    uint8_t  _implicit_padding[4];         // 编译器自动插入，保证下一个 uint64_t 8 字节对齐
+    uint64_t heartbeat_interval_ms;        // offset  0, 默认 500
+    uint64_t election_timeout_min_ms;      // offset  8, 默认 1500
+    uint64_t election_timeout_max_ms;      // offset 16, 默认 3000
+    uint32_t heartbeat_timeout_multiplier; // offset 24, 默认 3
+    uint8_t  _implicit_padding[4];         // offset 28, 编译器自动插入，保证下一个 uint64_t 8 字节对齐
 
-    uint64_t reconnect_initial_ms;         // 默认 1000
-    uint64_t reconnect_max_ms;             // 默认 30000
+    uint64_t reconnect_initial_ms;         // offset 32, 默认 1000
+    uint64_t reconnect_max_ms;             // offset 40, 默认 30000
 
-    uint32_t compression_threshold;        // 默认 512（字节）
-    uint32_t send_queue_capacity;          // 默认 1024
+    uint32_t compression_threshold;        // offset 48, 默认 512（字节）
+    uint32_t send_queue_capacity;          // offset 52, 默认 128
+    uint32_t max_connections;              // offset 56, 默认 64
+    uint32_t max_message_size;             // offset 60, 默认 262144（256 KiB）
 
-    uint8_t  centralized_auto_forward;     // 默认 1
-    uint8_t  auto_election_enabled;        // 默认 1
-    uint8_t  _padding[2];                  // 显式填充，保证结构体末尾 4 字节对齐
+    uint8_t  centralized_auto_forward;     // offset 64, 默认 1
+    uint8_t  auto_election_enabled;        // offset 65, 默认 1
+    uint16_t mdns_port;                    // offset 66, 默认 15353
+    uint8_t  manual_override_recovery;     // offset 68, 默认 0（Hold=0, AutoElect=1）
+    uint8_t  _trailing_padding[3];         // offset 69, 显式填充，保证下一个 uint64_t 8 字节对齐
+
+    uint64_t handshake_timeout_ms;         // offset 72, 默认 5000
 };
 ```
 
 - `validate()` 会校验字段合理性（非零、范围关系等），校验失败时 `InitializeNetworkWithConfig` 返回 `InvalidArgument`。
 - C# 侧使用 `LayoutKind.Sequential` 且不指定 `Pack` 时，编译器将自动处理隐式对齐填充，无需手动插入。
-- C# 绑定提供 `NetworkConfigFFI.Default()`，单元测试已校验结构体大小为 64 字节。
+- C# 绑定提供 `NetworkConfigFFI.Default()`，单元测试已校验结构体大小为 80 字节。
 
 > ⚠️ 修改 `NetworkConfigFFI` 的字段顺序或类型会破坏跨语言 ABI 兼容性，导致内存损坏。
 
@@ -224,7 +230,7 @@ void (*ConnectionResultCallback)(const char *addr, uint8_t success, int errorCod
 
 ## 📚 错误处理
 
-- 所有函数以 `int` 返回错误码。`0`（`OK`）表示成功，负数表示具体错误，常见值有 `NotInitialized (-1)`、`AlreadyInitialized (-2)`、`InvalidArgument (-3)`、`PeerNotFound (-5)`、`NotLeader (-6)` 等。
+- 所有函数以 `int` 返回错误码。`0`（`OK`）表示成功，负数表示具体错误，常见值有 `NotInitialized (-1)`、`AlreadyInitialized (-2)`、`InvalidArgument (-3)`、`PeerNotFound (-5)`、`NotLeader (-6)`、`AlreadyConnected (-14)` 等。其中 `AlreadyConnected` 表示该 peer 已通过其他路径（如 mDNS）连接，属于**非致命**结果。
 - 失败后可通过 `GetLastErrorCode()` / `GetLastErrorMessage()` 获取详细信息，消息字符串有效期至下一次返回字符串的调用前。
 - 在 `InitializeNetwork` 成功之前调用绝大多数 API 均会返回 `NotInitialized`（见测试 `ApiCallsBeforeInitReturnNotInitialized`）。
 

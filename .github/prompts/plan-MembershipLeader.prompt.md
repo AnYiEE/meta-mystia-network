@@ -101,8 +101,8 @@ struct ElectionState {
 pub struct LeaderElection {
     local_peer_id: PeerId,
     state: RwLock<ElectionState>,
-    membership_rx: Mutex<broadcast::Receiver<MembershipEvent>>,
     leader_change_tx: mpsc::Sender<Option<PeerId>>,
+    manual_override_recovery: ManualOverrideRecovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,7 +144,9 @@ pub enum Role {
    - 每 500ms 发送 Raft `Heartbeat` 维持领导权
    - 若收到更高 term 消息则 **更新 term，重置 `voted_for = None`**，退回 Follower
 
-4. **投票规则**（收到 `RequestVote` 时）：
+4. **选举循环跳过**：当 `leader_id().is_some()` 时，选举定时器到期后跳过选举（不进入 Candidate 状态），避免在已有 Leader 时发起不必要的选举。
+
+5. **投票规则**（收到 `RequestVote` 时）：
    - 若请求的 term < 当前 term，拒绝（`granted = false`）
    - 若请求的 term > 当前 term，更新 term，**重置 `voted_for = None`**，退回 Follower
    - 若 `voted_for` 为 None 或等于 candidate_id，投赞成票（`granted = true`），设置 `voted_for = candidate_id`
@@ -185,17 +187,21 @@ fn majority_threshold(total_nodes: usize) -> usize {
   - 更新 `term` 和 `leader_id`
   - 设置 `manual_override = true`
   - 不再发起自动选举
-- 当手动指定的 Leader 掉线且 `EnableAutoLeaderElection(true)` 被调用时，清除 `manual_override` 并恢复自动选举
+- **`handle_heartbeat` 在 `manual_override = true` 时拒绝来自非当前 leader 的心跳**（返回 `false`），防止自动选举产生的 Leader 覆盖手动指定的 Leader。来自当前 leader 的心跳仍正常接受。
+- **`handle_peer_left` 使用 `ManualOverrideRecovery` 枚举控制恢复策略**：
+  - `Hold`（默认）：保持 `manual_override = true`，清除 `leader_id` 但不触发自动选举，等待外部再次调用 `SetLeader`
+  - `AutoElect`：清除 `manual_override`，允许自动选举接管
+- `LeaderElection::new` 构造函数现在接受 `ManualOverrideRecovery` 参数（来自 `NetworkConfig`）
+- 当 `EnableAutoLeaderElection(true)` 被调用时，也会清除 `manual_override` 并恢复自动选举
 
 **Leader 变更回调**：
 
 - 当 `leader_id` 变化时（包括从 `Some` 到 `None`），发送事件到 `leader_change_tx`
 - FFI 层订阅此 channel 并调用 C# 回调
 
-**broadcast Lagged 处理**：
+**membership 事件处理**：
 
-- `membership_rx` 收到 `Lagged` 时，记录 `warn!` 日志并退出当前 drain 循环（不做实际全量同步）
-- 实际节点计数由 `drain_membership_events` 的调用方在外层维护，Lagged 时 `connected_peer_count` 可能偏小，选举误匹配 不影响正确性只影响决策时机
+- `spawn_membership_event_watcher`（定义于 `lib.rs`）独立订阅 `membership.event_tx` 的广播，直接调用 `leader_election.handle_peer_left(pid)` 处理节点离线
 
 ---
 

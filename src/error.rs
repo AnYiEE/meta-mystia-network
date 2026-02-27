@@ -28,6 +28,7 @@ pub(crate) mod error_codes {
     pub const DUPLICATE_PEER_ID: i32 = -11;
     pub const VERSION_MISMATCH: i32 = -12;
     pub const MAX_CONNECTIONS_REACHED: i32 = -13;
+    pub const ALREADY_CONNECTED: i32 = -14;
 
     // catch-all internal error, not supposed to be returned normally
     pub const INTERNAL_ERROR: i32 = -99;
@@ -63,6 +64,7 @@ pub enum NetworkError {
     // --- protocol state --------------------------------------------------
     NotLeader,
     MaxConnectionsReached,
+    AlreadyConnected(String),
 
     // --- messaging -------------------------------------------------------
     SendQueueFull,
@@ -97,6 +99,7 @@ impl NetworkError {
             Self::DuplicatePeerId(_) => error_codes::DUPLICATE_PEER_ID,
             Self::VersionMismatch { .. } => error_codes::VERSION_MISMATCH,
             Self::MaxConnectionsReached => error_codes::MAX_CONNECTIONS_REACHED,
+            Self::AlreadyConnected(_) => error_codes::ALREADY_CONNECTED,
             Self::NotImplemented | Self::Internal(_) => error_codes::INTERNAL_ERROR,
         }
     }
@@ -123,6 +126,7 @@ impl fmt::Display for NetworkError {
                 write!(f, "version mismatch: expected {expected}, got {got}")
             }
             Self::MaxConnectionsReached => write!(f, "max connections reached"),
+            Self::AlreadyConnected(id) => write!(f, "already connected to peer: {id}"),
             Self::HandshakeFailed(msg) => write!(f, "handshake failed: {msg}"),
             Self::HandshakeTimeout => write!(f, "handshake timeout"),
             Self::NotImplemented => write!(f, "not implemented"),
@@ -172,7 +176,7 @@ mod tests {
             error_codes::INVALID_ARGUMENT
         );
         assert_eq!(
-            NetworkError::Io(io::Error::new(io::ErrorKind::Other, "test")).error_code(),
+            NetworkError::Io(io::Error::other("test")).error_code(),
             error_codes::CONNECTION_FAILED
         );
         assert_eq!(
@@ -239,6 +243,10 @@ mod tests {
             NetworkError::Internal("test".into()).error_code(),
             error_codes::INTERNAL_ERROR
         );
+        assert_eq!(
+            NetworkError::AlreadyConnected("peer_x".into()).error_code(),
+            error_codes::ALREADY_CONNECTED
+        );
     }
 
     #[test]
@@ -271,6 +279,10 @@ mod tests {
         };
         let s = e.to_string();
         assert!(s.contains("a") && s.contains("b"));
+
+        let e = NetworkError::AlreadyConnected("peer_x".into());
+        assert!(e.to_string().contains("peer_x"));
+        assert!(e.to_string().contains("already connected"));
     }
 
     #[test]
@@ -290,10 +302,18 @@ mod tests {
     }
 
     #[test]
+    fn test_already_connected_error_code_is_negative_14() {
+        assert_eq!(error_codes::ALREADY_CONNECTED, -14);
+        let e = NetworkError::AlreadyConnected("peer_z".into());
+        assert_eq!(e.error_code(), -14);
+        assert_eq!(e.to_string(), "already connected to peer: peer_z");
+    }
+
+    #[test]
     fn test_error_source() {
         use std::error::Error;
 
-        let io_err = NetworkError::Io(io::Error::new(io::ErrorKind::Other, "test"));
+        let io_err = NetworkError::Io(io::Error::other("test"));
         assert!(io_err.source().is_some());
 
         let ser_err = NetworkError::Serialization(postcard::Error::DeserializeBadVarint);

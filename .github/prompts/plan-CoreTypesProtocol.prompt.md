@@ -60,19 +60,12 @@ strip = "symbols"
 /// 协议版本号，握手时交换，不兼容则拒绝连接
 pub const PROTOCOL_VERSION: u16 = 1;
 
-/// 最大消息大小（payload），防止内存耗尽
-pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1MB
-
-/// 最大连接数，防止资源耗尽
-pub const MAX_CONNECTIONS: usize = 64;
-
-/// 握手超时时间
-pub const HANDSHAKE_TIMEOUT_MS: u64 = 5000;
-
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkConfig {
     /// 压缩阈值（字节），超过此大小自动压缩，默认 512
     pub compression_threshold: u32,
+    /// 最大消息大小（payload），防止内存耗尽，默认 256*1024 (256 KiB)
+    pub max_message_size: u32,
     /// 心跳间隔（同时控制 Ping/Pong 发送频率和 Raft Heartbeat 发送频率），默认 500ms
     pub heartbeat_interval_ms: u64,
     /// 选举超时范围（最小值），默认 1500ms
@@ -85,27 +78,40 @@ pub struct NetworkConfig {
     pub reconnect_initial_ms: u64,
     /// 重连最大间隔，默认 30000ms
     pub reconnect_max_ms: u64,
-    /// 发送队列最大长度，默认 1024
+    /// 发送队列最大长度，默认 128
     pub send_queue_capacity: usize,
     /// 中心化模式下 Leader 是否自动转发消息，默认 true
     pub centralized_auto_forward: bool,
     /// 是否默认启用自动选举，默认 true
     pub auto_election_enabled: bool,
+    /// 手动指定 Leader 掉线后的恢复策略，默认 Hold
+    pub manual_override_recovery: ManualOverrideRecovery,
+    /// 最大同时连接数，防止资源耗尽，默认 64
+    pub max_connections: usize,
+    /// TCP 握手超时（ms），默认 5000
+    pub handshake_timeout_ms: u64,
+    /// mDNS 发现端口，默认 15353
+    pub mdns_port: u16,
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             compression_threshold: 512,
+            max_message_size: 256 * 1024, // 256 KiB
             heartbeat_interval_ms: 500,
             election_timeout_min_ms: 1500,
             election_timeout_max_ms: 3000,
             heartbeat_timeout_multiplier: 3,
             reconnect_initial_ms: 1000,
             reconnect_max_ms: 30000,
-            send_queue_capacity: 1024,
+            send_queue_capacity: 128,
             centralized_auto_forward: true,
             auto_election_enabled: true,
+            manual_override_recovery: ManualOverrideRecovery::Hold,
+            max_connections: 64,
+            handshake_timeout_ms: 5000,
+            mdns_port: 15353,
         }
     }
 }
@@ -269,6 +275,7 @@ pub mod error_codes {
     pub const DUPLICATE_PEER_ID: i32 = -11;
     pub const VERSION_MISMATCH: i32 = -12;
     pub const MAX_CONNECTIONS_REACHED: i32 = -13;
+    pub const ALREADY_CONNECTED: i32 = -14;
     pub const INTERNAL_ERROR: i32 = -99;
 }
 
@@ -288,6 +295,7 @@ pub enum NetworkError {
     DuplicatePeerId(String),
     VersionMismatch { expected: u16, got: u16 },
     MaxConnectionsReached,
+    AlreadyConnected(String),
     HandshakeFailed(String),
     HandshakeTimeout,
     NotImplemented,
@@ -308,7 +316,7 @@ impl NetworkError {
 
 - `cargo check` 通过编译
 - 所有类型实现所需的 derive trait（`Serialize`, `Deserialize`, `Debug`, `Clone` 等）
-- `NetworkError` 到错误码的映射覆盖所有变体（含新增的 `HandshakeTimeout`）
+- `NetworkError` 到错误码的映射覆盖所有变体（含 `HandshakeTimeout`、`AlreadyConnected`）
 - `error_codes` 定义在 `error.rs` 中，无循环依赖
 - `NetworkConfig::default()` 各字段值合理
 - `NetworkConfig::validate()` 拒绝非法参数组合
@@ -317,7 +325,6 @@ impl NetworkError {
 
 ## 实现映射（关键常量与 FFI 相关项）
 
-- **配置与常量**：`MAX_MESSAGE_SIZE`, `HANDSHAKE_TIMEOUT_MS`, `PROTOCOL_VERSION` 等常量定义在 `src/config.rs`，FFI 层在校验数据与长度时使用这些常量。
 - **NetworkConfigFFI**：位于 `src/ffi.rs` 的 `NetworkConfigFFI` 与本模块的 `NetworkConfig` 通过 `impl From<&NetworkConfigFFI> for NetworkConfig` 映射（字段一一对应，padding 已考虑）。
 - **错误码**：`error_codes` 常量定义在 `src/error.rs`，FFI 函数统一返回 `i32` 错误码并可通过 `GetLastErrorCode`/`GetLastErrorMessage` 查询。
 - **消息类型边界**：`msg_types::USER_MESSAGE_START == 0x0100` 为用户消息起点，FFI 与发送接口均在入口处验证该边界（见 `src/ffi.rs` 的 `BroadcastMessage` / `SendToPeer` 调用链）。

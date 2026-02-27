@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 
 namespace MetaMystiaNetworkBindings
 {
-  // ── Error codes ──────────────────────────────────────────────────────
+  // --- Error codes -----------------------------------------------------
 
   /// <summary>
   /// Numeric error codes returned by every FFI function that returns <c>int</c>.
@@ -57,11 +57,37 @@ namespace MetaMystiaNetworkBindings
     /// <summary>The connection limit (64) has been reached; new connections are refused.</summary>
     public const int MaxConnectionsReached = -13;
 
+    /// <summary>
+    /// The peer is already connected (not an error). ConnectToPeer treats this
+    /// as success with this code so the caller knows no new connection was created.
+    /// </summary>
+    public const int AlreadyConnected = -14;
+
     /// <summary>Unexpected internal error inside the Rust library; check logs for details.</summary>
     public const int InternalError = -99;
   }
 
-  // ── Enumerations ─────────────────────────────────────────────────────
+  // --- Enumerations ----------------------------------------------------
+
+  /// <summary>
+  /// Controls what happens when a manually-assigned leader goes offline.
+  /// Used only when <c>manual_override</c> is active in the election module.
+  /// </summary>
+  public enum ManualOverrideRecovery : byte
+  {
+    /// <summary>
+    /// Keep manual override active; do NOT start an automatic election.
+    /// The upper layer is expected to call <see cref="MetaMystiaNetwork.SetLeader"/>
+    /// again or take other recovery action.
+    /// </summary>
+    Hold = 0,
+
+    /// <summary>
+    /// Clear manual override and let the normal Raft-like election take over,
+    /// choosing a new leader automatically.
+    /// </summary>
+    AutoElect = 1,
+  }
 
   /// <summary>
   /// Connection state of a remote peer as reported by
@@ -98,7 +124,7 @@ namespace MetaMystiaNetworkBindings
     ConnectionResult,
   }
 
-  // ── NetworkEvent ─────────────────────────────────────────────────────
+  // --- NetworkEvent ----------------------------------------------------
 
   /// <summary>
   /// Carries data for a single network event dequeued during <see cref="NetworkManager.Poll"/>.
@@ -151,7 +177,7 @@ namespace MetaMystiaNetworkBindings
     public NetworkEvent() { }
   }
 
-  // ── NetworkConfigFFI ─────────────────────────────────────────────────
+  // --- NetworkConfigFFI ------------------------------------------------
 
   /// <summary>
   /// C-compatible runtime configuration passed to the Rust library via
@@ -163,7 +189,7 @@ namespace MetaMystiaNetworkBindings
   /// <para>
   /// The field layout is <c>#[repr(C)]</c>-compatible with the Rust struct.
   /// <b>Do not reorder fields or change types</b> without also updating the Rust
-  /// side. The struct occupies exactly 64 bytes:
+  /// side. The struct occupies exactly 80 bytes:
   /// </para>
   /// <code>
   ///  offset  0  heartbeat_interval_ms        u64  (8 B)
@@ -175,11 +201,15 @@ namespace MetaMystiaNetworkBindings
   ///  offset 40  reconnect_max_ms             u64  (8 B)
   ///  offset 48  compression_threshold        u32  (4 B)
   ///  offset 52  send_queue_capacity          u32  (4 B)
-  ///  offset 56  centralized_auto_forward     u8   (1 B)
-  ///  offset 57  auto_election_enabled        u8   (1 B)
-  ///  offset 58  _padding                     u8×2 (2 B)
-  ///  offset 60  [4 B trailing padding, struct aligned to 8]
-  ///  sizeof = 64
+  ///  offset 56  max_connections              u32  (4 B)
+  ///  offset 60  max_message_size             u32  (4 B)
+  ///  offset 64  centralized_auto_forward     u8   (1 B)
+  ///  offset 65  auto_election_enabled        u8   (1 B)
+  ///  offset 66  mdns_port                    u16  (2 B)
+  ///  offset 68  manual_override_recovery     u8   (1 B)
+  ///  offset 69  [3 B alignment padding]
+  ///  offset 72  handshake_timeout_ms         u64  (8 B)
+  ///  sizeof = 80
   /// </code>
   /// </remarks>
   [StructLayout(LayoutKind.Sequential)]
@@ -220,11 +250,24 @@ namespace MetaMystiaNetworkBindings
     public uint compression_threshold;
 
     /// <summary>
-    /// Capacity of each peer's outbound send queue (packets). Must be &gt; 0.
+    /// Capacity of each peer's outbound send queue (packets). Must be 0.
     /// Exceeding the capacity returns <see cref="NetErrorCode.SendQueueFull"/>.
-    /// Default: 1024.
+    /// Default: 128.
     /// </summary>
     public uint send_queue_capacity;
+
+    /// <summary>
+    /// Maximum number of simultaneous TCP connections. Must be 0.
+    /// Exceeding this limit returns <see cref="NetErrorCode.MaxConnectionsReached"/>.
+    /// Default: 64.
+    /// </summary>
+    public uint max_connections;
+
+    /// <summary>
+    /// Maximum allowed message size in bytes. Must be > 0.
+    /// Default: 262 144 (256 KiB).
+    /// </summary>
+    public uint max_message_size;
 
     /// <summary>
     /// Centralized-mode Leader behavior: <c>1</c> = automatically re-broadcast
@@ -240,8 +283,28 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     public byte auto_election_enabled;
 
-    // Explicit padding preserving the Rust repr(C) layout. Do not modify.
-    private readonly ushort _padding;
+    /// <summary>
+    /// UDP port for mDNS peer discovery. Both publisher and browser must use
+    /// the same port. Standard mDNS uses 5353 but the Windows DNS Client
+    /// occupies that port; <c>15353</c> avoids the conflict. Default: 15353.
+    /// </summary>
+    public ushort mdns_port;
+
+    /// <summary>
+    /// Behaviour when a manually-assigned leader goes offline.
+    /// Only relevant when <c>manual_override</c> is active.
+    /// <c>0</c> = <see cref="ManualOverrideRecovery.Hold"/> (default),
+    /// <c>1</c> = <see cref="ManualOverrideRecovery.AutoElect"/>.
+    /// </summary>
+    public byte manual_override_recovery;
+
+    // 3 bytes of alignment padding (implicit in LayoutKind.Sequential)
+
+    /// <summary>
+    /// Timeout (ms) to complete the TCP handshake with a remote peer.
+    /// Must be 0. Default: 5000.
+    /// </summary>
+    public ulong handshake_timeout_ms;
 
     /// <summary>
     /// Returns a <see cref="NetworkConfigFFI"/> pre-filled with the same defaults
@@ -256,13 +319,18 @@ namespace MetaMystiaNetworkBindings
       reconnect_initial_ms = 1000,
       reconnect_max_ms = 30_000,
       compression_threshold = 512,
-      send_queue_capacity = 1024,
+      send_queue_capacity = 128,
+      max_connections = 64,
+      max_message_size = 256 * 1024,
       centralized_auto_forward = 1,
       auto_election_enabled = 1,
+      mdns_port = 15353,
+      manual_override_recovery = (byte)ManualOverrideRecovery.Hold,
+      handshake_timeout_ms = 5000,
     };
   }
 
-  // ── Callback delegate types ──────────────────────────────────────────────
+  // --- Callback delegate types ---------------------------------------------
 
   /// <summary>
   /// Invoked on a Rust background thread when a user message arrives.
@@ -318,7 +386,7 @@ namespace MetaMystiaNetworkBindings
   [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
   public delegate void ConnectionResultCallback(IntPtr addr, byte success, int errorCode);
 
-  // ── Raw P/Invoke bindings ────────────────────────────────────────────────
+  // --- Raw P/Invoke bindings -----------------------------------------------
 
   /// <summary>
   /// Direct P/Invoke bindings for the native <c>meta_mystia_network</c> library.
@@ -392,6 +460,15 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     [DllImport(DLL, CallingConvention = CC)]
     public static extern byte IsNetworkInitialized();
+
+    /// <summary>
+    /// Returns <c>1</c> if mDNS discovery started successfully and is
+    /// active, <c>0</c> otherwise (e.g., port conflict, multicast
+    /// unavailable, or network not initialized). When <c>0</c>, peer
+    /// discovery relies solely on manual <see cref="ConnectToPeer"/> calls.
+    /// </summary>
+    [DllImport(DLL, CallingConvention = CC)]
+    public static extern byte IsMdnsActive();
 
     #endregion
 
@@ -668,7 +745,7 @@ namespace MetaMystiaNetworkBindings
     #endregion
   }
 
-  // ── High-level NetworkManager — complete usage example ───────────────────
+  // --- High-level NetworkManager — complete usage example ------------------
 
   /// <summary>
   /// Thread-safe, <see cref="IDisposable"/> wrapper around <see cref="MetaMystiaNetwork"/>
@@ -721,7 +798,7 @@ namespace MetaMystiaNetworkBindings
   /// </remarks>
   public sealed class NetworkManager : IDisposable
   {
-    // ── User-defined message type example constants (≥ 0x0100) ───────────
+    // --- User-defined message type example constants (≥ 0x0100) ----------
     //    0x0001–0x00FF are reserved by the internal protocol.
     //    Define your own application message types here or in a separate class.
 
@@ -729,7 +806,7 @@ namespace MetaMystiaNetworkBindings
     // public const ushort MsgTypePlayerMove = 0x0101;
     // public const ushort MsgTypeGameState  = 0x0102;
 
-    // ── Static pinned delegates ───────────────────────────────────────────
+    // --- Static pinned delegates ------------------------------------------
     //    Must be static so they survive GC for the lifetime of the process.
     //    The native library holds raw function pointers to these methods.
     private static readonly ReceiveCallback s_onReceive = OnReceiveNative;
@@ -737,11 +814,11 @@ namespace MetaMystiaNetworkBindings
     private static readonly PeerStatusCallback s_onPeerStatus = OnPeerStatusNative;
     private static readonly ConnectionResultCallback s_onConnResult = OnConnectionResultNative;
 
-    // ── Cross-thread event queue ──────────────────────────────────────────
+    // --- Cross-thread event queue -----------------------------------------
     //    Native callbacks (Rust thread) enqueue; Poll() (caller thread) dequeues.
     private static readonly ConcurrentQueue<NetworkEvent> s_eventQueue = new();
 
-    // ── Active-instance back-reference ────────────────────────────────────
+    // --- Active-instance back-reference -----------------------------------
     //    Static callbacks need this to reach the current instance's C# events.
     private static NetworkManager? s_instance;
 
@@ -763,7 +840,7 @@ namespace MetaMystiaNetworkBindings
       s_instance = this;
     }
 
-    // ── C# events (raised on the thread that calls Poll) ──────────────────
+    // --- C# events (raised on the thread that calls Poll) -----------------
 
     /// <summary>
     /// Raised when a user message arrives from a remote peer.
@@ -789,7 +866,7 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     public event Action<string, bool, int>? ConnectionResult;
 
-    // ── Properties ───────────────────────────────────────────────────────
+    // --- Properties ------------------------------------------------------
 
     /// <summary>Local TCP listener address, e.g. <c>"0.0.0.0:54321"</c>.</summary>
     public string LocalAddr => MetaMystiaNetwork.PtrToString(MetaMystiaNetwork.GetLocalAddr());
@@ -809,7 +886,13 @@ namespace MetaMystiaNetworkBindings
     /// <summary>Number of peers currently in the Connected state.</summary>
     public int PeerCount => MetaMystiaNetwork.GetPeerCount();
 
-    // ── Lifecycle ────────────────────────────────────────────────────────
+    /// <summary>
+    /// <c>true</c> if mDNS discovery is active. When <c>false</c>, peer
+    /// discovery relies on manual <see cref="MetaMystiaNetwork.ConnectToPeer"/> calls.
+    /// </summary>
+    public bool IsMdnsActive => MetaMystiaNetwork.IsMdnsActive() != 0;
+
+    // --- Lifecycle -------------------------------------------------------
 
     /// <summary>
     /// Initializes the native network stack with default configuration and
@@ -838,7 +921,7 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     public void Shutdown() => MetaMystiaNetwork.ShutdownNetwork();
 
-    // ── Main-loop pump ────────────────────────────────────────────────────
+    // --- Main-loop pump ---------------------------------------------------
 
     /// <summary>
     /// Drains all pending network events from the internal queue and raises
@@ -867,7 +950,7 @@ namespace MetaMystiaNetworkBindings
       }
     }
 
-    // ── Convenience send wrappers ─────────────────────────────────────────
+    // --- Convenience send wrappers ----------------------------------------
 
     /// <summary>Broadcasts <paramref name="data"/> to all connected peers.</summary>
     /// <param name="msgType">Must be ≥ <c>0x0100</c>.</param>
@@ -890,7 +973,7 @@ namespace MetaMystiaNetworkBindings
         MetaMystiaNetwork.PtrToString(MetaMystiaNetwork.GetPeerList())
                          .Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
-    // ── IDisposable ───────────────────────────────────────────────────────
+    // --- IDisposable ------------------------------------------------------
 
     /// <inheritdoc/>
     public void Dispose()
@@ -901,7 +984,7 @@ namespace MetaMystiaNetworkBindings
       s_instance = null;
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────
+    // --- Private helpers --------------------------------------------------
 
     private static void RegisterCallbacks()
     {
@@ -911,7 +994,7 @@ namespace MetaMystiaNetworkBindings
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterConnectionResultCallback(s_onConnResult));
     }
 
-    // ── Native callbacks ─────────────────────────────────────────────────
+    // --- Native callbacks ------------------------------------------------
     //    Invoked on a Rust background thread.
     //    Rules: copy pointer data synchronously; do NOT call any FFI function.
 

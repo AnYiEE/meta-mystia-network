@@ -75,63 +75,68 @@ static LAST_RETURNED_STRING: Mutex<Option<CString>> = Mutex::new(None);
 
 #### FFI 接口列表
 
-| 函数                          | 签名                                                                                                          | 说明                                                              |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `InitializeNetwork`           | `(peer_id: *const c_char, session_id: *const c_char) -> i32`                                                  | 默认配置初始化                                                    |
-| `InitializeNetworkWithConfig` | `(..., config: *const NetworkConfigFFI) -> i32`                                                               | 自定义配置（含 validate）                                         |
-| `ShutdownNetwork`             | `() -> i32`                                                                                                   | 优雅关闭                                                          |
-| `IsNetworkInitialized`        | `() -> u8`                                                                                                    |                                                                   |
-| `GetLastErrorCode`            | `() -> i32`                                                                                                   |                                                                   |
-| `GetLastErrorMessage`         | `() -> *const c_char`                                                                                         |                                                                   |
-| `ConnectToPeer`               | `(addr: *const c_char) -> i32`                                                                                | 异步，结果通过回调；握手超时/失败会以 `ConnectionFailed` 形式返回 |
-| `DisconnectPeer`              | `(peer_id: *const c_char) -> i32`                                                                             | 不触发自动重连                                                    |
-| `GetLocalAddr`                | `() -> *const c_char`                                                                                         |                                                                   |
-| `GetLocalPeerId`              | `() -> *const c_char`                                                                                         |                                                                   |
-| `GetSessionId`                | `() -> *const c_char`                                                                                         |                                                                   |
-| `GetPeerCount`                | `() -> i32`                                                                                                   | Connected 数量                                                    |
-| `GetPeerList`                 | `() -> *const c_char`                                                                                         | `\n` 分隔                                                         |
-| `GetPeerRTT`                  | `(peer_id: *const c_char) -> i32`                                                                             | -1=未知                                                           |
-| `GetPeerStatus`               | `(peer_id: *const c_char) -> i32`                                                                             | 0/1/2/3/-1                                                        |
-| `SetLeader`                   | `(peer_id: *const c_char) -> i32`                                                                             |                                                                   |
-| `EnableAutoLeaderElection`    | `(enable: u8) -> i32`                                                                                         |                                                                   |
-| `GetCurrentLeader`            | `() -> *const c_char`                                                                                         | 空串=无                                                           |
-| `IsLeader`                    | `() -> u8`                                                                                                    |                                                                   |
-| `SetCentralizedMode`          | `(enable: u8) -> i32`                                                                                         |                                                                   |
-| `IsCentralizedMode`           | `() -> u8`                                                                                                    |                                                                   |
-| `SetCentralizedAutoForward`   | `(enable: u8) -> i32`                                                                                         |                                                                   |
-| `IsCentralizedAutoForward`    | `() -> u8`                                                                                                    |                                                                   |
-| `SetCompressionThreshold`     | `(threshold: u32) -> i32`                                                                                     |                                                                   |
-| `BroadcastMessage`            | `(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                                             | flags bit 0 由库管理                                              |
-| `SendToPeer`                  | `(target: *const c_char, data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                      |                                                                   |
-| `SendToLeader`                | `(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                                             |                                                                   |
-| `SendFromLeader`              | `(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                                             |                                                                   |
-| `ForwardMessage`              | `(from: *const c_char, target: *const c_char, data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32` | target=null 广播                                                  |
-| `Register*Callback`           | `(callback: FnPtr) -> i32`                                                                                    | null=注销，共 4 个                                                |
-| `EnableLogging`               | `(enable: u8) -> i32`                                                                                         | 仅首次生效                                                        |
+| 函数                          | 签名                                                                                                          | 说明                                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `InitializeNetwork`           | `(peer_id: *const c_char, session_id: *const c_char) -> i32`                                                  | 默认配置初始化                                                                                                 |
+| `InitializeNetworkWithConfig` | `(..., config: *const NetworkConfigFFI) -> i32`                                                               | 自定义配置（含 validate）                                                                                      |
+| `ShutdownNetwork`             | `() -> i32`                                                                                                   | 优雅关闭                                                                                                       |
+| `IsNetworkInitialized`        | `() -> u8`                                                                                                    |                                                                                                                |
+| `GetLastErrorCode`            | `() -> i32`                                                                                                   |                                                                                                                |
+| `GetLastErrorMessage`         | `() -> *const c_char`                                                                                         |                                                                                                                |
+| `ConnectToPeer`               | `(addr: *const c_char) -> i32`                                                                                | 异步，结果通过回调；握手超时/失败会以 `ConnectionFailed` 形式返回；已连接的 peer 返回 `ALREADY_CONNECTED(-14)` |
+| `DisconnectPeer`              | `(peer_id: *const c_char) -> i32`                                                                             | 不触发自动重连                                                                                                 |
+| `GetLocalAddr`                | `() -> *const c_char`                                                                                         |                                                                                                                |
+| `GetLocalPeerId`              | `() -> *const c_char`                                                                                         |                                                                                                                |
+| `GetSessionId`                | `() -> *const c_char`                                                                                         |                                                                                                                |
+| `GetPeerCount`                | `() -> i32`                                                                                                   | Connected 数量                                                                                                 |
+| `GetPeerList`                 | `() -> *const c_char`                                                                                         | `\n` 分隔                                                                                                      |
+| `GetPeerRTT`                  | `(peer_id: *const c_char) -> i32`                                                                             | -1=未知                                                                                                        |
+| `GetPeerStatus`               | `(peer_id: *const c_char) -> i32`                                                                             | 0/1/2/3/-1                                                                                                     |
+| `SetLeader`                   | `(peer_id: *const c_char) -> i32`                                                                             |                                                                                                                |
+| `EnableAutoLeaderElection`    | `(enable: u8) -> i32`                                                                                         |                                                                                                                |
+| `GetCurrentLeader`            | `() -> *const c_char`                                                                                         | 空串=无                                                                                                        |
+| `IsLeader`                    | `() -> u8`                                                                                                    |                                                                                                                |
+| `SetCentralizedMode`          | `(enable: u8) -> i32`                                                                                         |                                                                                                                |
+| `IsCentralizedMode`           | `() -> u8`                                                                                                    |                                                                                                                |
+| `SetCentralizedAutoForward`   | `(enable: u8) -> i32`                                                                                         |                                                                                                                |
+| `IsCentralizedAutoForward`    | `() -> u8`                                                                                                    |                                                                                                                |
+| `SetCompressionThreshold`     | `(threshold: u32) -> i32`                                                                                     |                                                                                                                |
+| `BroadcastMessage`            | `(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                                             | flags bit 0 由库管理                                                                                           |
+| `SendToPeer`                  | `(target: *const c_char, data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                      |                                                                                                                |
+| `SendToLeader`                | `(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                                             |                                                                                                                |
+| `SendFromLeader`              | `(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                                             |                                                                                                                |
+| `ForwardMessage`              | `(from: *const c_char, target: *const c_char, data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32` | target=null 广播                                                                                               |
+| `Register*Callback`           | `(callback: FnPtr) -> i32`                                                                                    | null=注销，共 4 个                                                                                             |
+| `EnableLogging`               | `(enable: u8) -> i32`                                                                                         | 仅首次生效                                                                                                     |
 
 #### NetworkConfigFFI
 
-字段按大小降序排列，无隐式 padding：
+字段按大小降序排列，`#[repr(C)]` 布局（总大小 80 字节）：
 
 ```rust
 #[repr(C)]
 pub struct NetworkConfigFFI {
-    pub heartbeat_interval_ms: u64,        // offset 0
-    pub election_timeout_min_ms: u64,      // offset 8
+    pub heartbeat_interval_ms: u64,        // offset  0
+    pub election_timeout_min_ms: u64,      // offset  8
     pub election_timeout_max_ms: u64,      // offset 16
     pub heartbeat_timeout_multiplier: u32, // offset 24
-    // 4-byte alignment pad after u32 → next field at offset 32
+    // [4 B implicit padding]              // offset 28
     pub reconnect_initial_ms: u64,         // offset 32
     pub reconnect_max_ms: u64,             // offset 40
     pub compression_threshold: u32,        // offset 48
     pub send_queue_capacity: u32,          // offset 52
-    pub centralized_auto_forward: u8,      // offset 56
-    pub auto_election_enabled: u8,         // offset 57
-    pub _padding: [u8; 2],                 // offset 58 (struct size 64 with trailing padding)
-}
+    pub max_connections: u32,              // offset 56
+    pub max_message_size: u32,             // offset 60
+    pub centralized_auto_forward: u8,      // offset 64
+    pub auto_election_enabled: u8,         // offset 65
+    pub mdns_port: u16,                    // offset 66
+    pub manual_override_recovery: u8,      // offset 68 — 0=Hold, 1=AutoElect
+    pub _padding: [u8; 3],                 // offset 69 — 对齐填充
+    pub handshake_timeout_ms: u64,         // offset 72
+}   // sizeof = 80
 ```
 
-C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u64→ulong`，`u32→uint`，`u8→byte`，padding 用 `private ushort`。
+C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u64→ulong`，`u32→uint`，`u8→byte`，padding 用 3 个 `private byte`（`_padding1`, `_padding2`, `_padding3`）。
 
 `InitializeNetworkWithConfig` 先转换为 `NetworkConfig`，再调 `config.validate()` 验证参数。
 
@@ -157,7 +162,7 @@ fn return_string(s: String) -> *const c_char {
 1. 创建 `CancellationToken`
 2. `TransportManager::new()` → 解构得到 `(transport, incoming_rx)`
 3. `MembershipManager::new()`
-4. `LeaderElection::new()` → 订阅 `membership.event_tx`
+4. `LeaderElection::new(local_peer_id, auto_election_enabled, manual_override_recovery, leader_change_tx)`
 5. `SessionRouter::new()` → 持有 transport + leader_election
 6. `CallbackManager::new()` → 订阅 leader_change + membership 事件
 7. `DiscoveryManager::new()` → 持有 transport + membership
@@ -206,7 +211,7 @@ fn return_string(s: String) -> *const c_char {
 ### 4. 日志
 
 - 使用 `tracing` crate，`logging` feature 控制 `tracing-subscriber` 可选依赖
-- `EnableLogging(1)` 首次调用初始化 `tracing_subscriber::fmt()`，后续调用无操作
+- `EnableLogging(1)` 首次调用初始化 `tracing_subscriber::fmt().with_ansi(false)`（禁用 ANSI 色彩码），后续调用无操作
 - 无 `logging` feature 时静默忽略
 
 | 级别    | 内容                                           |
@@ -222,7 +227,7 @@ fn return_string(s: String) -> *const c_char {
 ## Verification
 
 - 所有 FFI 函数有 `catch_unwind`，无 `bool` 跨边界
-- `NetworkConfigFFI` 无隐式 padding
+- `NetworkConfigFFI` 大小为 80 字节（含 1 处隐式 padding（offset 28）+ 1 处显式 padding（offset 69，`_padding: [u8; 3]`））
 - Shutdown 顺序：PeerLeave → drain → cancel → discovery → drain_callback → transport → join_callback_thread → destroy Runtime
 - Shutdown 后可再次 Initialize
 - `error_codes` 从 `error.rs` 导入

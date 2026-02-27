@@ -6,7 +6,7 @@
 
 本计划覆盖 TCP 连接管理与消息编解码，是网络通信的核心基础设施。
 
-注意：文档同时列出内部 Rust 方法（snake_case）与 FFI 导出函数（CamelCase），并注明对应关系。例如：内部 `PacketCodec::new()`，FFI 层的 `ConnectToPeer`。
+注意：文档同时列出内部 Rust 方法（snake_case）与 FFI 导出函数（CamelCase），并注明对应关系。例如：内部 `PacketCodec::new(max_message_size)`，FFI 层的 `ConnectToPeer`。
 
 ---
 
@@ -37,10 +37,10 @@ impl RawPacket {
 
 **功能：**
 
-1. **encode_packet(msg_type, data, user_flags, compression_threshold) -> RawPacket**：
+1. **encode_packet(msg_type, data, user_flags, compression_threshold, max_message_size) -> RawPacket**：
    - **msg_type 验证**：若 `msg_type < USER_MESSAGE_START`（即 `< 0x0100`），返回 `NetworkError::InvalidArgument`（仅用户消息调用此函数；内部消息使用 `encode_internal`）
    - **flags 预处理**：先将 `user_flags` 的低位（压缩标志位）清零——`let clean_flags = user_flags & 0xFE`。后续步骤基于 `clean_flags` 构建返回值。
-   - **大小检查**：若 `data.len() as u32 > MAX_MESSAGE_SIZE`，立即返回 `NetworkError::MessageTooLarge`
+   - **大小检查**：若 `data.len() as u32 > max_message_size`，立即返回 `NetworkError::MessageTooLarge`
    - 如果 `data.len()` 超过 `compression_threshold`：
      - 调用 `lz4_flex::block::compress_prepend_size` 压缩
      - 若压缩结果比原始数据短，返回 `RawPacket { msg_type, flags: clean_flags | 0x01, payload: Bytes::from(compressed) }`（低位用于标记已压缩）
@@ -55,7 +55,7 @@ impl RawPacket {
 3. **内部控制消息序列化**：
 
    ```rust
-   pub fn encode_internal(msg: &InternalMessage) -> Result<RawPacket, NetworkError> {
+   pub fn encode_internal(msg: &InternalMessage, max_message_size: u32) -> Result<RawPacket, NetworkError> {
        let payload = postcard::to_allocvec(msg)?;
        let msg_type = match msg {
            InternalMessage::Handshake { .. } => msg_types::HANDSHAKE,
@@ -71,7 +71,7 @@ impl RawPacket {
    ```
 
 4. **消息大小验证**：
-   - 编码前检查 payload 是否超过 `MAX_MESSAGE_SIZE`
+   - 编码前检查 payload 是否超过 `max_message_size`（来自 `NetworkConfig` 字段）
    - 超过则返回 `NetworkError::MessageTooLarge`
 
 ### 2. `src/transport.rs` — TCP 传输层
@@ -168,7 +168,7 @@ impl Encoder<RawPacket> for PacketCodec {
 1. **TCP Listener**：
    - 绑定 `0.0.0.0:0`（系统分配端口）
    - `accept` 循环，每个新连接 spawn 到 `handle_incoming_connection`
-   - 连接数达到 `MAX_CONNECTIONS` 时拒绝新连接
+   - 连接数达到 `config.max_connections` 时拒绝新连接
 
 2. **TCP Keep-alive**：
    - 使用 `socket2` crate 设置 TCP 层 Keep-alive
@@ -176,7 +176,7 @@ impl Encoder<RawPacket> for PacketCodec {
    - `keepalive_retries = 3`（**仅 macOS/Linux**；Windows 无 `TCP_KEEPCNT`，跳过此设置而非报错）
 
 3. **连接握手（含超时）**：
-   - 新 TCP 连接建立后，启动 `HANDSHAKE_TIMEOUT_MS`（5s）计时器
+   - 新 TCP 连接建立后，启动 `config.handshake_timeout_ms`（5s）计时器
    - 主动方发送 `Handshake { peer_id, listen_port, protocol_version, session_id }`
    - 被动方验证：
      - `protocol_version` 必须兼容
@@ -184,6 +184,7 @@ impl Encoder<RawPacket> for PacketCodec {
      - `peer_id` 不能与已有连接冲突
    - 验证通过返回 `HandshakeAck { peer_id, listen_port, success: true }`，随后发送 `PeerListSync`
    - 验证失败返回 `HandshakeAck { success: false, error_reason }` 并关闭连接
+   - **AlreadyConnected 处理**：若 `peer_id` 已存在于连接表中（`has_peer()`），`receive_handshake` 发送 `HandshakeAck(success=true, error_reason="already_connected")` 并返回 `NetworkError::AlreadyConnected`（非 fatal），被动方保留已有连接不受影响。`connect_to` 收到此类 ack 后也返回 `AlreadyConnected`。此外，`handle_incoming_connection` 和 `connect_to` 均在调用 `register_connection` 后捕获 `DuplicatePeerId`（TOCTOU 保护——`receive_handshake` 的 `has_peer()` 检查与 `register_connection` 注册之间存在时间窗口），将其静默处理为保留已有连接。这使得重复连接成为非致命的预期结果。
    - **超时处理**：5s 内未完成握手（未收到 Handshake 或 HandshakeAck），关闭连接并返回 `NetworkError::HandshakeTimeout`（在 FFI 层映射为 `error_codes::CONNECTION_FAILED`）。
    - **成功后通知**：握手成功后，Transport 将收到的 Handshake（被动方）或 HandshakeAck（主动方）转发至 `incoming_rx`，消息处理器据此调用 `membership.add_peer()` 并触发 `PeerJoined` 事件
 
@@ -239,11 +240,11 @@ impl Encoder<RawPacket> for PacketCodec {
 - `encode_packet` 拒绝 `msg_type < USER_MESSAGE_START`
 - `encode_packet` / `decode_payload` 单元测试：各种大小 + 压缩阈值边界 + user_flags 保留
 - `encode_internal` / `decode_internal` 单元测试：InternalMessage 所有变体序列化/反序列化往返
-- 消息大小验证：超过 `MAX_MESSAGE_SIZE` 时返回正确错误
+- 消息大小验证：超过 `max_message_size`（`NetworkConfig` 字段）时返回正确错误
 - 2 节点 loopback TCP 连接 + 握手成功集成测试
 - 握手版本不匹配/session 不匹配/重复 peer_id 时返回失败并发送含 reason 的 `HandshakeAck`
 - 握手超时测试：一方不发 Handshake，5s 后连接关闭
-- 超过 `MAX_CONNECTIONS` 时拒绝新连接
+- 超过 `config.max_connections` 时拒绝新连接
 - `DisconnectPeer` 后不触发自动重连
 - PeerListSync 触发的连接遵循字典序去重规则
 - **TCP Keep-alive 在 Windows 和 macOS 上均不报错**（Windows 跳过 retries 设置）
@@ -255,6 +256,6 @@ impl Encoder<RawPacket> for PacketCodec {
   另外还有若干辅助查询/控制方法用于上层逻辑与测试：
   `get_connected_peer_ids()`, `has_peer()`, `set_should_reconnect()`, `update_peer_status()`, `update_last_seen()` / `update_rtt()`, `get_peer_rtt()`, `get_peer_status()`, `get_peer_addr()`。
 - PacketCodec 行为：`Decoder` 在成功切出 header 与 payload 后使用 `payload.freeze()` 返回 `Bytes`，`Encoder` 在写入前调用 `dst.reserve(7 + payload.len())`；这与 `messaging.rs` 中 `RawPacket` 的零拷贝设计一致。
-- 握手流程与超时：`HANDSHAKE_TIMEOUT_MS` 在 `src/config.rs` 定义（5s），`receive_handshake`/`receive_handshake_ack` 在 `transport.rs` 中实现；失败返回 `HandshakeTimeout`（FFI 映射到 `CONNECTION_FAILED`）或 `HandshakeFailed`。
+- 握手流程与超时：`config.handshake_timeout_ms` 在 `NetworkConfig` 中定义（默认 5000ms），`receive_handshake`/`receive_handshake_ack` 在 `transport.rs` 中实现；失败返回 `HandshakeTimeout`（FFI 映射到 `CONNECTION_FAILED`）或 `HandshakeFailed`。
 
 （将此映射作为 Transport 计划的权威引用，便于与 FFI/上层逻辑一一核对。）

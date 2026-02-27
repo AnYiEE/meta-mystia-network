@@ -10,54 +10,65 @@
 
 ## 测试清单
 
-| 测试                                       | 验证内容                                                           |
-| ------------------------------------------ | ------------------------------------------------------------------ |
-| **单元测试**                               |                                                                    |
-| `test_packet_encode_decode`                | 消息编码/解码往返 + 各种大小                                       |
-| `test_packet_compression`                  | 压缩/解压正确性 + 阈值边界                                         |
-| `test_packet_codec_framing`                | PacketCodec 粘包：分包、半包、多包粘连                             |
-| `test_internal_message_serde`              | InternalMessage 所有变体序列化往返                                 |
-| `test_error_code_mapping`                  | NetworkError → error_code 覆盖所有变体                             |
-| `test_config_validation`                   | NetworkConfig::validate 拒绝非法参数                               |
-| `test_user_msg_type_validation`            | msg_type < 0x0100 被拒绝                                           |
-| `test_flags_compression_bit`               | 用户 flags bit 0 被库清除，bit 1-7 透传                            |
-| **连接与握手**                             |                                                                    |
-| `test_two_node_connect`                    | 2 节点 loopback TCP 连接 + 握手成功                                |
-| `test_handshake_version_mismatch`          | 协议版本不匹配时握手拒绝                                           |
-| `test_handshake_session_mismatch`          | session_id 不匹配时握手拒绝                                        |
-| `test_handshake_duplicate_peer_id`         | 相同 peer_id 连接时拒绝                                            |
-| `test_handshake_timeout`                   | 不发 Handshake，5s 后断开                                          |
-| `test_max_connections`                     | 超过 MAX_CONNECTIONS 时拒绝                                        |
-| **心跳与成员**                             |                                                                    |
-| `test_heartbeat_timeout_detection`         | 心跳超时检测（last_seen 超限后标记 Disconnected）                  |
-| `test_rtt_measurement`                     | RTT 计算准确性（MembershipManager.handle_pong 时间差）             |
-| `test_reconnect_exponential_backoff`       | 意外断线后自动重连 + 退避                                          |
-| `test_disconnect_no_reconnect`             | DisconnectPeer 后不触发自动重连                                    |
-| **选举**                                   |                                                                    |
-| `test_auto_leader_election_3_nodes`        | 3 节点自动选举                                                     |
-| `test_auto_leader_election_2_nodes`        | 2 节点特殊处理（阈值=1）                                           |
-| `test_manual_set_leader`                   | SetLeader 覆盖自动选举                                             |
-| `test_leader_failover`                     | Leader 掉线后重新选举                                              |
-| `test_split_brain_recovery`                | 分区恢复后 Leader 统一                                             |
-| **消息路由**                               |                                                                    |
-| `test_broadcast_message`                   | 非中心化模式广播                                                   |
-| `test_centralized_routing`                 | 中心化模式经 Leader 转发                                           |
-| `test_forward_message`                     | Leader 转发给指定 peer                                             |
-| `test_send_queue_overflow`                 | 队列满时返回 SendQueueFull                                         |
-| `test_large_message_near_limit`            | 接近 MAX_MESSAGE_SIZE 的消息                                       |
-| `test_message_too_large`                   | 超 MAX_MESSAGE_SIZE 时拒绝                                         |
-| **发现**                                   |                                                                    |
-| `test_discovery_same_session_auto_connect` | mDNS 注册/发现（同 session）                                       |
-| `test_discovery_session_isolation`         | 不同 session 不互连                                                |
-| **FFI 与生命周期**                         |                                                                    |
-| `test_ffi_callbacks`                       | 回调注册与触发                                                     |
-| `test_ffi_error_codes_not_initialized`     | 未初始化时调用 FFI 返回正确错误码                                  |
-| `test_ffi_full_lifecycle`                  | FFI 完整生命周期：initialize→connect→send→shutdown                 |
-| `test_concurrent_ffi_calls`                | 多线程 FFI 调用安全                                                |
-| `test_graceful_shutdown`                   | PeerLeave + 资源清理                                               |
-| `test_shutdown_reinitialize`               | Shutdown 后可再次 Initialize                                       |
-| `test_rapid_connect_disconnect`            | 快速连接/断开压力测试                                              |
-| `test_broadcast_lagged_recovery`           | broadcast channel Lagged 后仍能通过 get_peer_list 获取完整成员列表 |
+| 测试                                                          | 验证内容                                                               |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **单元测试**                                                  |                                                                        |
+| `test_packet_encode_decode`                                   | 消息编码/解码往返 + 各种大小                                           |
+| `test_packet_compression`                                     | 压缩/解压正确性 + 阈值边界                                             |
+| `test_packet_codec_framing`                                   | PacketCodec 粘包：分包、半包、多包粘连                                 |
+| `test_internal_message_serde`                                 | InternalMessage 所有变体序列化往返                                     |
+| `test_error_code_mapping`                                     | NetworkError → error_code 覆盖所有变体                                 |
+| `test_already_connected_error_code_is_negative_14`            | `AlreadyConnected` 错误码映射为 -14                                    |
+| `test_config_validation`                                      | NetworkConfig::validate 拒绝非法参数                                   |
+| `test_user_msg_type_validation`                               | msg_type < 0x0100 被拒绝                                               |
+| `test_flags_compression_bit`                                  | 用户 flags bit 0 被库清除，bit 1-7 透传                                |
+| `test_manual_override_recovery_from_u8`                       | `ManualOverrideRecovery::from_u8` 正确映射 0/1/其他值                  |
+| `test_manual_override_recovery_default_in_config`             | `NetworkConfig::default()` 的 `manual_override_recovery` 为 `Hold`     |
+| **连接与握手**                                                |                                                                        |
+| `test_two_node_connect`                                       | 2 节点 loopback TCP 连接 + 握手成功                                    |
+| `test_handshake_version_mismatch`                             | 协议版本不匹配时握手拒绝                                               |
+| `test_handshake_session_mismatch`                             | session_id 不匹配时握手拒绝                                            |
+| `test_handshake_duplicate_peer_id`                            | 相同 peer_id 连接时拒绝                                                |
+| `test_handshake_timeout`                                      | 不发 Handshake，5s 后断开                                              |
+| `test_max_connections`                                        | 超过 `config.max_connections`（`NetworkConfig` 字段）时拒绝            |
+| **心跳与成员**                                                |                                                                        |
+| `test_heartbeat_timeout_detection`                            | 心跳超时检测（last_seen 超限后标记 Disconnected）                      |
+| `test_rtt_measurement`                                        | RTT 计算准确性（MembershipManager.handle_pong 时间差）                 |
+| `test_reconnect_exponential_backoff`                          | 意外断线后自动重连 + 退避                                              |
+| `test_disconnect_no_reconnect`                                | DisconnectPeer 后不触发自动重连                                        |
+| **选举**                                                      |                                                                        |
+| `test_auto_leader_election_3_nodes`                           | 3 节点自动选举                                                         |
+| `test_auto_leader_election_2_nodes`                           | 2 节点特殊处理（阈值=1）                                               |
+| `test_manual_set_leader`                                      | SetLeader 覆盖自动选举                                                 |
+| `test_heartbeat_rejects_foreign_leader_under_manual_override` | `manual_override=true` 时拒绝非当前 leader 的心跳                      |
+| `test_heartbeat_accepts_same_leader_under_manual_override`    | `manual_override=true` 时接受当前 leader 的心跳                        |
+| `test_peer_left_hold_recovery_keeps_manual_override`          | `ManualOverrideRecovery::Hold` 下 leader 掉线保持 manual_override      |
+| `test_peer_left_auto_elect_recovery_clears_manual_override`   | `ManualOverrideRecovery::AutoElect` 下 leader 掉线清除 manual_override |
+| `test_leader_failover`                                        | Leader 掉线后重新选举                                                  |
+| `test_split_brain_recovery`                                   | 分区恢复后 Leader 统一                                                 |
+| **消息路由**                                                  |                                                                        |
+| `test_broadcast_message`                                      | 非中心化模式广播                                                       |
+| `test_centralized_routing`                                    | 中心化模式经 Leader 转发                                               |
+| `test_forward_message`                                        | Leader 转发给指定 peer                                                 |
+| `test_send_queue_overflow`                                    | 队列满时返回 SendQueueFull                                             |
+| `test_large_message_near_limit`                               | 接近 `max_message_size`（`NetworkConfig` 字段）的消息                  |
+| `test_message_too_large`                                      | 超 `max_message_size` 时拒绝                                           |
+| **发现**                                                      |                                                                        |
+| `test_discovery_same_session_auto_connect`                    | mDNS 注册/发现（同 session）                                           |
+| `test_discovery_session_isolation`                            | 不同 session 不互连                                                    |
+| `test_discovery_transport_connected_skipped`                  | `should_connect_to_discovered_peer` 在 transport 已连接时跳过          |
+| **AlreadyConnected 与竞态保护**                               |                                                                        |
+| `test_already_connected_inbound`                              | 入站重复连接返回 AlreadyConnected（transport 层）                      |
+| `test_already_connected_outbound`                             | 出站重复连接返回 AlreadyConnected（transport 层）                      |
+| **FFI 与生命周期**                                            |                                                                        |
+| `test_ffi_callbacks`                                          | 回调注册与触发                                                         |
+| `test_ffi_error_codes_not_initialized`                        | 未初始化时调用 FFI 返回正确错误码                                      |
+| `test_ffi_full_lifecycle`                                     | FFI 完整生命周期：initialize→connect→send→shutdown                     |
+| `test_concurrent_ffi_calls`                                   | 多线程 FFI 调用安全                                                    |
+| `test_graceful_shutdown`                                      | PeerLeave + 资源清理                                                   |
+| `test_shutdown_reinitialize`                                  | Shutdown 后可再次 Initialize                                           |
+| `test_rapid_connect_disconnect`                               | 快速连接/断开压力测试                                                  |
+| `test_broadcast_lagged_recovery`                              | broadcast channel Lagged 后仍能通过 get_peer_list 获取完整成员列表     |
 
 > mDNS 测试依赖多播，loopback 上可能不工作。标记 `#[ignore]`，在有真实网卡的环境运行。
 
@@ -114,5 +125,13 @@ async fn wait_until(f: impl Fn() -> bool, timeout_ms: u64) -> bool {
 - **内部测试（Rust API / 单元测试）**：如 `test_packet_encode_decode`、`test_packet_compression`、`test_packet_codec_framing`、`test_internal_message_serde`、`test_config_validation` 等，直接调用 crate 内部函数（snake_case）并使用 `#[tokio::test]` / `#[test]`。
 - **FFI 测试（生命周期/边界）**：如 `test_ffi_callbacks`、`test_ffi_error_codes_not_initialized`、`test_ffi_full_lifecycle`、`test_concurrent_ffi_calls`、`test_shutdown_reinitialize` 等，通过 `InitializeNetwork` / `ShutdownNetwork` / `BroadcastMessage` 等导出函数进行集成级别验证，确保 `catch_unwind`、字符串返回语义、回调线程行为与错误码契约（其中 panic 安全性与握手超时在 `test_ffi_full_lifecycle` 中一并覆盖）。
 - **混合集成测试**：如 `test_two_node_connect`、`test_auto_leader_election_3_nodes` 等使用 `NetworkState::new` 或在钩子里直接 spawn 多个 runtime 节点以模拟网络拓扑；这些测试更接近实现细节并用于回归验证。
+
+## E2E 集成测试（连接竞态与选举修复）
+
+| 测试名                                  | 所在文件 | 验证内容                                                      |
+| --------------------------------------- | -------- | ------------------------------------------------------------- |
+| `test_mdns_race_connect_then_manual`    | `lib.rs` | mDNS 自动连接后手动 ConnectTo 返回 AlreadyConnected（非致命） |
+| `test_election_skips_known_leader`      | `lib.rs` | 已知 leader 时选举 term 稳定不变，无多余选举                  |
+| `test_manual_leader_survives_heartbeat` | `lib.rs` | 手动 SetLeader 后节点拒绝外部高 term 心跳，不被覆盖           |
 
 （此节帮助区分应该新增到哪一类测试以覆盖特定实现边界。）

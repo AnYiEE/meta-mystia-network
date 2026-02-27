@@ -75,7 +75,7 @@ pub struct SessionRouter {
            return Err(NetworkError::NotLeader);
        }
        let clean_flags = flags & 0xFE;
-       let packet = encode_packet(msg_type, payload, clean_flags, self.compression_threshold())?;
+       let packet = encode_packet(msg_type, payload, clean_flags, self.compression_threshold(), self.max_message_size())?;
        match target {
            ForwardTarget::ToPeer(ref peer_id) => {
                self.transport.send_to_peer(peer_id, packet)?;
@@ -97,9 +97,9 @@ pub struct SessionRouter {
    > 广播。此 helper 简化了接收端逻辑并保证 flags/payload 一致。
 
 6. **运行时配置（注意区分内部方法与 FFI）**：
-    - 内部 `SessionRouter` 提供方法：`set_centralized(enable: bool)` / `is_centralized() -> bool` 控制中心化开关。FFI 层同时导出 `SetCentralizedMode` / `IsCentralizedMode` 作为 C 接口。
-    - 内部 `SessionRouter` 的 leader 行为可由 `set_auto_forward(enable: bool)` / `is_auto_forward() -> bool` 调整；对应 FFI 为 `SetCentralizedAutoForward` / `IsCentralizedAutoForward`。
-    - 内部可通过 `set_compression_threshold(threshold: u32)` 动态调整阈值；对应 FFI 为 `SetCompressionThreshold`，影响后续 `encode_packet` 是否触发 LZ4。
+   - 内部 `SessionRouter` 提供方法：`set_centralized(enable: bool)` / `is_centralized() -> bool` 控制中心化开关。FFI 层同时导出 `SetCentralizedMode` / `IsCentralizedMode` 作为 C 接口。
+   - 内部 `SessionRouter` 的 leader 行为可由 `set_auto_forward(enable: bool)` / `is_auto_forward() -> bool` 调整；对应 FFI 为 `SetCentralizedAutoForward` / `IsCentralizedAutoForward`。
+   - 内部可通过 `set_compression_threshold(threshold: u32)` 动态调整阈值；对应 FFI 为 `SetCompressionThreshold`，影响后续 `encode_packet` 是否触发 LZ4。
 
 7. **权限检查**：
    - `SendFromLeader`：若本地不是 Leader，返回 `NetworkError::NotLeader`
@@ -177,10 +177,10 @@ pub struct DiscoveryManager {
                                continue; // TXT 记录不完整，跳过
                            };
 
-                           // 过滤（session 隔离、排除自己、去重、字典序去重）
-                           // 委托给 should_connect_to_discovered_peer() 静态方法
-                           if !Self::should_connect_to_discovered_peer(
-                               &local_peer_id, &session_id, peer_id, session, &membership,
+                          // 过滤（session 隔离、排除自己、去重、字典序去重、transport 已连接检查）
+                          // 委托给 should_connect_to_discovered_peer() 静态方法
+                          if !Self::should_connect_to_discovered_peer(
+                              &local_peer_id, &session_id, peer_id, session, &membership, &transport,
                            ) {
                                continue;
                            }
@@ -239,6 +239,7 @@ pub fn connect_to_discovery_server(_server_addr: &str) -> Result<(), NetworkErro
 - **用户 flags 的 bit 0 被库自动清除，bit 1-7 透传**
 - mDNS 服务注册/发现（同一 session）测试
 - 不同 session_id 的节点不互连测试
+- `should_connect_to_discovered_peer` 同时检查 `membership.has_peer()` 和 `transport.has_peer()`，任一返回 true 则跳过连接
 
 > **注意**：mDNS 依赖多播（multicast），在 loopback 上可能不工作。mDNS 相关测试需要绕过 mDNS 直接用手动连接，或在有真实网卡的环境中运行，并标记为 `#[ignore]`。
 

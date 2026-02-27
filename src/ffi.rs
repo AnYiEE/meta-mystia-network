@@ -15,7 +15,7 @@ use crate::NetworkState;
 use crate::callback::{
     ConnectionResultCallback, LeaderChangedCallback, PeerStatusCallback, ReceiveCallback,
 };
-use crate::config::{MAX_MESSAGE_SIZE, NetworkConfig};
+use crate::config::NetworkConfig;
 use crate::error::NetworkError;
 use crate::error::error_codes;
 use crate::messaging::encode_internal;
@@ -86,7 +86,30 @@ where
 
 /// C-compatible layout for network configuration. Field order mirrors
 /// the Rust `NetworkConfig` and groups timing, sizing and feature
-/// toggle parameters together. `_padding` ensures 32‑bit alignment.
+/// toggle parameters together.
+///
+/// # Layout (80 bytes, 8-byte aligned)
+///
+/// ```text
+/// offset  0  heartbeat_interval_ms        u64  (8 B)
+/// offset  8  election_timeout_min_ms      u64  (8 B)
+/// offset 16  election_timeout_max_ms      u64  (8 B)
+/// offset 24  heartbeat_timeout_multiplier u32  (4 B)
+/// offset 28  [4 B implicit padding]
+/// offset 32  reconnect_initial_ms         u64  (8 B)
+/// offset 40  reconnect_max_ms             u64  (8 B)
+/// offset 48  compression_threshold        u32  (4 B)
+/// offset 52  send_queue_capacity          u32  (4 B)
+/// offset 56  max_connections              u32  (4 B)
+/// offset 60  max_message_size             u32  (4 B)
+/// offset 64  centralized_auto_forward     u8   (1 B)
+/// offset 65  auto_election_enabled        u8   (1 B)
+/// offset 66  mdns_port                    u16  (2 B)
+/// offset 68  manual_override_recovery     u8   (1 B)
+/// offset 69  [3 B explicit padding]
+/// offset 72  handshake_timeout_ms         u64  (8 B)
+/// sizeof = 80
+/// ```
 #[repr(C)]
 pub struct NetworkConfigFFI {
     // heartbeat/election timing
@@ -103,12 +126,27 @@ pub struct NetworkConfigFFI {
     pub compression_threshold: u32,
     pub send_queue_capacity: u32,
 
+    // connection limits
+    pub max_connections: u32,
+
+    // maximum message size
+    pub max_message_size: u32,
+
     // feature toggles (use 0/1)
     pub centralized_auto_forward: u8,
     pub auto_election_enabled: u8,
 
-    // pad to multiple of 4 bytes
-    pub _padding: [u8; 2],
+    // mDNS discovery port
+    pub mdns_port: u16,
+
+    // manual override recovery strategy (0 = Hold, 1 = AutoElect)
+    pub manual_override_recovery: u8,
+
+    // explicit padding to maintain alignment
+    pub(crate) _padding: [u8; 3],
+
+    // handshake timeout
+    pub handshake_timeout_ms: u64,
 }
 
 impl From<&NetworkConfigFFI> for NetworkConfig {
@@ -122,34 +160,16 @@ impl From<&NetworkConfigFFI> for NetworkConfig {
             reconnect_max_ms: ffi.reconnect_max_ms,
             compression_threshold: ffi.compression_threshold,
             send_queue_capacity: ffi.send_queue_capacity as usize,
+            max_connections: ffi.max_connections as usize,
+            max_message_size: ffi.max_message_size,
+            handshake_timeout_ms: ffi.handshake_timeout_ms,
+            mdns_port: ffi.mdns_port,
             centralized_auto_forward: ffi.centralized_auto_forward != 0,
             auto_election_enabled: ffi.auto_election_enabled != 0,
+            manual_override_recovery: crate::config::ManualOverrideRecovery::from_u8(
+                ffi.manual_override_recovery,
+            ),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    // CString imported when needed by individual tests
-
-    #[test]
-    fn test_c_str_to_string_null() {
-        let err = unsafe { c_str_to_string(std::ptr::null()) };
-        assert!(matches!(err, Err(NetworkError::InvalidArgument(_))));
-    }
-
-    #[test]
-    fn test_return_string_and_last_error() {
-        let ptr = return_string("hello".into());
-        let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap() };
-        assert_eq!(s, "hello");
-
-        set_error(123, "oops");
-        let guard = LAST_ERROR.lock();
-        let pair = guard.as_ref().unwrap();
-        assert_eq!(pair.0, 123);
-        assert_eq!(pair.1, "oops");
     }
 }
 
@@ -280,6 +300,15 @@ pub extern "C" fn IsNetworkInitialized() -> u8 {
     catch_unwind(|| u8::from(NETWORK.lock().is_some())).unwrap_or(0)
 }
 
+/// Query whether mDNS discovery is currently active.
+/// Returns 1 if mDNS started successfully, 0 otherwise
+/// (e.g., port conflict, multicast not available, or not initialized).
+#[unsafe(no_mangle)]
+pub extern "C" fn IsMdnsActive() -> u8 {
+    catch_unwind(|| with_network(|state| Ok(u8::from(state.is_mdns_active()))).unwrap_or(0))
+        .unwrap_or(0)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn GetLastErrorCode() -> i32 {
     catch_unwind(|| {
@@ -336,6 +365,13 @@ pub extern "C" fn ConnectToPeer(addr: *const c_char) -> i32 {
                 match transport.connect_to(&addr_clone).await {
                     Ok(_) => {
                         callback.send_connection_result(&addr_clone, true, error_codes::OK);
+                    }
+                    Err(NetworkError::AlreadyConnected(_)) => {
+                        callback.send_connection_result(
+                            &addr_clone,
+                            true,
+                            error_codes::ALREADY_CONNECTED,
+                        );
                     }
                     Err(e) => {
                         callback.send_connection_result(&addr_clone, false, e.error_code());
@@ -514,11 +550,14 @@ pub extern "C" fn SetLeader(peer_id: *const c_char) -> i32 {
 
         let result = with_network(|state| {
             let (term, leader_id, assigner_id) = state.leader_election.set_leader(&pid);
-            let assign = encode_internal(&InternalMessage::LeaderAssign {
-                term,
-                leader_id,
-                assigner_id,
-            })?;
+            let assign = encode_internal(
+                &InternalMessage::LeaderAssign {
+                    term,
+                    leader_id,
+                    assigner_id,
+                },
+                state.config.max_message_size,
+            )?;
             state.transport.broadcast(assign, None);
             Ok(())
         });
@@ -674,7 +713,7 @@ pub extern "C" fn SetCompressionThreshold(threshold: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn BroadcastMessage(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32 {
     catch_unwind(|| {
-        if data.is_null() || length < 0 || length as u32 > MAX_MESSAGE_SIZE {
+        if data.is_null() || length < 0 {
             set_error(
                 error_codes::INVALID_ARGUMENT,
                 "invalid data pointer or length",
@@ -684,6 +723,11 @@ pub extern "C" fn BroadcastMessage(data: *const u8, length: i32, msg_type: u16, 
         let slice = unsafe { std::slice::from_raw_parts(data, length as usize) };
 
         let result = with_network(|state| {
+            if length as u32 > state.config.max_message_size {
+                return Err(NetworkError::InvalidArgument(
+                    "message exceeds max_message_size".into(),
+                ));
+            }
             state
                 .session_router
                 .route_message(MessageTarget::Broadcast, msg_type, slice, flags)
@@ -720,7 +764,7 @@ pub extern "C" fn SendToPeer(
                 return e.error_code();
             }
         };
-        if data.is_null() || length < 0 || length as u32 > MAX_MESSAGE_SIZE {
+        if data.is_null() || length < 0 {
             set_error(
                 error_codes::INVALID_ARGUMENT,
                 "invalid data pointer or length",
@@ -731,6 +775,11 @@ pub extern "C" fn SendToPeer(
         let pid = PeerId::new(&target_str);
 
         let result = with_network(|state| {
+            if length as u32 > state.config.max_message_size {
+                return Err(NetworkError::InvalidArgument(
+                    "message exceeds max_message_size".into(),
+                ));
+            }
             state.session_router.route_message(
                 MessageTarget::ToPeer(pid.clone()),
                 msg_type,
@@ -756,7 +805,7 @@ pub extern "C" fn SendToPeer(
 #[unsafe(no_mangle)]
 pub extern "C" fn SendToLeader(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32 {
     catch_unwind(|| {
-        if data.is_null() || length < 0 || length as u32 > MAX_MESSAGE_SIZE {
+        if data.is_null() || length < 0 {
             set_error(
                 error_codes::INVALID_ARGUMENT,
                 "invalid data pointer or length",
@@ -766,6 +815,11 @@ pub extern "C" fn SendToLeader(data: *const u8, length: i32, msg_type: u16, flag
         let slice = unsafe { std::slice::from_raw_parts(data, length as usize) };
 
         let result = with_network(|state| {
+            if length as u32 > state.config.max_message_size {
+                return Err(NetworkError::InvalidArgument(
+                    "message exceeds max_message_size".into(),
+                ));
+            }
             state
                 .session_router
                 .route_message(MessageTarget::ToLeader, msg_type, slice, flags)
@@ -788,7 +842,7 @@ pub extern "C" fn SendToLeader(data: *const u8, length: i32, msg_type: u16, flag
 #[unsafe(no_mangle)]
 pub extern "C" fn SendFromLeader(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32 {
     catch_unwind(|| {
-        if data.is_null() || length < 0 || length as u32 > MAX_MESSAGE_SIZE {
+        if data.is_null() || length < 0 {
             set_error(
                 error_codes::INVALID_ARGUMENT,
                 "invalid data pointer or length",
@@ -798,6 +852,11 @@ pub extern "C" fn SendFromLeader(data: *const u8, length: i32, msg_type: u16, fl
         let slice = unsafe { std::slice::from_raw_parts(data, length as usize) };
 
         let result = with_network(|state| {
+            if length as u32 > state.config.max_message_size {
+                return Err(NetworkError::InvalidArgument(
+                    "message exceeds max_message_size".into(),
+                ));
+            }
             state
                 .session_router
                 .send_from_leader(msg_type, slice, flags)
@@ -834,7 +893,7 @@ pub extern "C" fn ForwardMessage(
                 return e.error_code();
             }
         };
-        if data.is_null() || length < 0 || length as u32 > MAX_MESSAGE_SIZE {
+        if data.is_null() || length < 0 {
             set_error(
                 error_codes::INVALID_ARGUMENT,
                 "invalid data pointer or length",
@@ -857,6 +916,11 @@ pub extern "C" fn ForwardMessage(
         };
 
         let result = with_network(|state| {
+            if length as u32 > state.config.max_message_size {
+                return Err(NetworkError::InvalidArgument(
+                    "message exceeds max_message_size".into(),
+                ));
+            }
             state
                 .session_router
                 .forward_message(&from_pid, fwd_target, msg_type, flags, slice)
@@ -987,6 +1051,7 @@ pub extern "C" fn EnableLogging(enable: u8) -> i32 {
                 static INIT: Once = Once::new();
                 INIT.call_once(|| {
                     tracing_subscriber::fmt()
+                        .with_ansi(false)
                         .with_env_filter(
                             tracing_subscriber::EnvFilter::from_default_env()
                                 .add_directive(tracing::Level::INFO.into()),
@@ -1001,4 +1066,29 @@ pub extern "C" fn EnableLogging(enable: u8) -> i32 {
         set_error(error_codes::INTERNAL_ERROR, "panic in EnableLogging");
         error_codes::INTERNAL_ERROR
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // CString imported when needed by individual tests
+
+    #[test]
+    fn test_c_str_to_string_null() {
+        let err = unsafe { c_str_to_string(std::ptr::null()) };
+        assert!(matches!(err, Err(NetworkError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn test_return_string_and_last_error() {
+        let ptr = return_string("hello".into());
+        let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap() };
+        assert_eq!(s, "hello");
+
+        set_error(123, "oops");
+        let guard = LAST_ERROR.lock();
+        let pair = guard.as_ref().unwrap();
+        assert_eq!(pair.0, 123);
+        assert_eq!(pair.1, "oops");
+    }
 }

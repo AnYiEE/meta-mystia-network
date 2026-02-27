@@ -211,7 +211,7 @@ impl CallbackManager {
         }
     }
 
-    // ----- helper methods used by other modules --------------------------
+    // --- helper methods used by other modules ----------------------------
 
     /// Try to enqueue an event; on full queue we drop and log.
     pub fn send_event(&self, event: CallbackEvent) {
@@ -257,7 +257,7 @@ impl CallbackManager {
         });
     }
 
-    // ----- registration API ----------------------------------------------
+    // --- registration API ------------------------------------------------
 
     /// Install or clear the connection result callback.
     pub fn register_connection_result_callback(&self, cb: Option<ConnectionResultCallback>) {
@@ -279,7 +279,7 @@ impl CallbackManager {
         *self.receive_callback.lock() = cb;
     }
 
-    // ----- shutdown helpers ----------------------------------------------
+    // --- shutdown helpers ------------------------------------------------
 
     /// Stop accepting new events and signal the worker thread to exit.
     pub fn drain_and_shutdown(&self) {

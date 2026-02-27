@@ -38,7 +38,21 @@ public static class NetErrorCode
     public const int DuplicatePeerId = -11;
     public const int VersionMismatch = -12;
     public const int MaxConnectionsReached = -13;
+    public const int AlreadyConnected = -14;
     public const int InternalError = -99;
+}
+```
+
+### 手动覆盖恢复策略
+
+```csharp
+/// <summary>手动指定 Leader 掉线后的恢复策略。</summary>
+public enum ManualOverrideRecovery : byte
+{
+    /// <summary>保持 manual_override，不自动选举，等待外部再次 SetLeader。</summary>
+    Hold = 0,
+    /// <summary>清除 manual_override，允许自动选举接管。</summary>
+    AutoElect = 1,
 }
 ```
 
@@ -97,13 +111,25 @@ public struct NetworkConfigFFI
     public ulong reconnect_max_ms;
     /// <summary>LZ4 压缩阈值（字节），payload 超此大小自动压缩。默认 512</summary>
     public uint  compression_threshold;
-    /// <summary>per-peer 发送队列上限。满时返回 SendQueueFull。默认 1024</summary>
+    /// <summary>per-peer 发送队列上限。满时返回 SendQueueFull。默认 128</summary>
     public uint  send_queue_capacity;
+    /// <summary>最大连接数。默认 64</summary>
+    public uint  max_connections;
+    /// <summary>最大消息大小（payload 字节）。默认 262144 (256 KiB)</summary>
+    public uint  max_message_size;
     /// <summary>中心化模式下 Leader 自动转发。0=需 C# 手动 Forward，1=自动。默认 1</summary>
     public byte  centralized_auto_forward;
     /// <summary>启用自动 Raft 选举。0=仅手动 SetLeader，1=自动。默认 1</summary>
     public byte  auto_election_enabled;
-    private ushort _padding; // 对齐填充，勿修改
+    /// <summary>mDNS 端口。默认 15353</summary>
+    public ushort mdns_port;
+    /// <summary>手动 Leader 掉线恢复策略。0=Hold，1=AutoElect。默认 0</summary>
+    public byte  manual_override_recovery;
+    private byte _padding1; // 对齐填充，勿修改
+    private byte _padding2;
+    private byte _padding3;
+    /// <summary>握手超时（ms）。默认 5000</summary>
+    public ulong handshake_timeout_ms;
 
     /// <summary>返回所有字段为默认值的配置实例。</summary>
     public static NetworkConfigFFI Default() => new()
@@ -115,9 +141,14 @@ public struct NetworkConfigFFI
         reconnect_initial_ms = 1000,
         reconnect_max_ms = 30000,
         compression_threshold = 512,
-        send_queue_capacity = 1024,
+        send_queue_capacity = 128,
+        max_connections = 64,
+        max_message_size = 262144,
         centralized_auto_forward = 1,
         auto_election_enabled = 1,
+        mdns_port = 15353,
+        manual_override_recovery = 0,
+        handshake_timeout_ms = 5000,
     };
 }
 ```
