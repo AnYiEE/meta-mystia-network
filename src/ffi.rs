@@ -84,10 +84,10 @@ where
     f(state)
 }
 
-#[repr(C)]
 /// C-compatible layout for network configuration. Field order mirrors
 /// the Rust `NetworkConfig` and groups timing, sizing and feature
 /// toggle parameters together. `_padding` ensures 32‑bit alignment.
+#[repr(C)]
 pub struct NetworkConfigFFI {
     // heartbeat/election timing
     pub heartbeat_interval_ms: u64,

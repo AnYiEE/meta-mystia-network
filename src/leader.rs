@@ -10,8 +10,8 @@ use tokio::sync::{broadcast, mpsc};
 use crate::membership::MembershipEvent;
 use crate::types::PeerId;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Current state of this node in the leader election FSM.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
     Follower,
     Candidate,

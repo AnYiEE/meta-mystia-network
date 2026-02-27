@@ -33,13 +33,13 @@ pub(crate) mod error_codes {
     pub const INTERNAL_ERROR: i32 = -99;
 }
 
-#[derive(Debug)]
 /// Rich error type used within the Rust implementation. Each
 /// variant corresponds to a particular failure mode; many are
 /// parameterized with details for diagnostics.
 ///
 /// Variants are grouped roughly by category to make conversions
 /// and matching easier.
+#[derive(Debug)]
 pub enum NetworkError {
     // --- initialization --------------------------------------------------
     NotInitialized,
