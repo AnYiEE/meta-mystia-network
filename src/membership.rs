@@ -31,16 +31,13 @@ pub enum MembershipEvent {
 /// and associated metadata. Thread-safe APIs allow other tasks to
 /// query or update information without blocking.
 pub struct MembershipManager {
-    // identity of this node
+    /// identity of this node
     local_peer_id: PeerId,
-
-    // protected map from PeerId -> PeerInfo
+    /// protected map from PeerId -> PeerInfo
     peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
-
-    // configuration parameters used during timeouts and other checks
+    /// configuration parameters used during timeouts and other checks
     config: NetworkConfig,
-
-    // broadcast sender for membership events
+    /// broadcast sender for membership events
     pub event_tx: broadcast::Sender<MembershipEvent>,
 }
 

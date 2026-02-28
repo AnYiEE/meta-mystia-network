@@ -160,13 +160,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_default_valid() {
+    fn test_default_config_valid() {
         assert!(NetworkConfig::default().validate().is_ok());
     }
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
-    fn test_config_validation() {
+    fn test_validation() {
         let d = NetworkConfig::default();
         let mut config = NetworkConfig::default();
 
@@ -208,7 +208,6 @@ mod tests {
             ManualOverrideRecovery::from_u8(1),
             ManualOverrideRecovery::AutoElect
         );
-        // Unrecognised values fall back to Hold
         assert_eq!(
             ManualOverrideRecovery::from_u8(2),
             ManualOverrideRecovery::Hold

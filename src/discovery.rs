@@ -30,20 +30,20 @@ const SERVICE_TYPE: &str = "_meta-mystia._tcp.local.";
 /// Fields are grouped: backend state, identity, network helpers,
 /// and shutdown control.
 pub struct DiscoveryManager {
-    // --- backend ---------------------------------------------------------
+    // backend
     daemon: ServiceDaemon,
 
-    // --- identity information --------------------------------------------
+    // identity information
     local_peer_id: PeerId,
     session_id: String,
     instance_name: String, // derived from session + peer
     listen_port: u16,
 
-    // --- references to other subsystems ----------------------------------
+    // references to other subsystems
     membership: Arc<MembershipManager>,
     transport: Arc<TransportManager>,
 
-    // --- shutdown control ------------------------------------------------
+    // shutdown control
     shutdown_token: CancellationToken,
 }
 
@@ -182,7 +182,7 @@ impl DiscoveryManager {
                                     tokio::spawn(async move {
                                         match transport.connect_to(&target).await {
                                             Ok(_) => {}
-                                            Err(crate::error::NetworkError::AlreadyConnected(_)) => {
+                                            Err(NetworkError::AlreadyConnected(_)) => {
                                                 tracing::debug!(addr = %target, "mDNS: peer already connected");
                                             }
                                             Err(e) => {
@@ -258,9 +258,10 @@ impl DiscoveryManager {
 mod tests {
     use super::*;
 
+    use tokio_util::sync::CancellationToken;
+
     use crate::config::NetworkConfig;
     use crate::transport::TransportManager;
-    use tokio_util::sync::CancellationToken;
 
     fn make_membership(peer_id: &str) -> MembershipManager {
         MembershipManager::new(PeerId::new(peer_id), NetworkConfig::default())
@@ -280,7 +281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_same_session_connects() {
+    async fn test_same_session_connects() {
         let membership = make_membership("peer_a");
         let transport = make_transport("peer_a").await;
         assert!(DiscoveryManager::should_connect_to_discovered_peer(
@@ -294,7 +295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_different_session_rejects() {
+    async fn test_different_session_rejects() {
         let membership = make_membership("peer_a");
         let transport = make_transport("peer_a").await;
         assert!(!DiscoveryManager::should_connect_to_discovered_peer(
@@ -308,7 +309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_self_excluded() {
+    async fn test_self_excluded() {
         let membership = make_membership("peer_a");
         let transport = make_transport("peer_a").await;
         assert!(!DiscoveryManager::should_connect_to_discovered_peer(
@@ -322,12 +323,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_already_connected_skipped() {
+    async fn test_already_connected_skipped() {
         let membership = make_membership("peer_a");
         let transport = make_transport("peer_a").await;
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         membership.add_peer(PeerId::new("peer_b"), addr).unwrap();
-
         assert!(!DiscoveryManager::should_connect_to_discovered_peer(
             &PeerId::new("peer_a"),
             "session1",
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_lexicographic_dedup() {
+    async fn test_lexicographic_dedup() {
         let membership = make_membership("peer_b");
         let transport = make_transport("peer_b").await;
         // peer_b > peer_a → peer_b should NOT initiate (peer_a should)
@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_transport_connected_skipped() {
+    async fn test_transport_connected_skipped() {
         // When transport already has a connection to a peer but
         // membership hasn't registered it yet, discovery should
         // still skip the peer.

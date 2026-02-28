@@ -20,19 +20,24 @@ use crate::types::{ForwardTarget, MessageTarget, PeerId};
 /// Fields are ordered: identity, dependencies, configuration
 /// state (atomics) used at runtime.
 pub struct SessionRouter {
-    // identity of this node
+    /// identity of this node
     local_peer_id: PeerId,
 
-    // dependencies on other managers
+    // --- dependencies on other managers ----------------------------------
+    /// used for sending packets to peers and broadcasting
     transport: Arc<TransportManager>,
+    /// used for querying current leader and election status
     leader_election: Arc<LeaderElection>,
 
-    // runtime configuration/state stored atomically for
-    // lock‑free modification by other threads
-    centralized_mode: AtomicBool, // true when operating under leader
-    centralized_auto_forward: AtomicBool, // leader behavior toggle
-    compression_threshold: AtomicU32, // size at which packets compress
-    max_message_size: u32,        // maximum payload size in bytes
+    // --- runtime configuration/state stored atomically for lock‑free modification by other threads
+    /// true when operating under leader
+    centralized_mode: AtomicBool,
+    /// leader behavior toggle
+    centralized_auto_forward: AtomicBool,
+    /// size at which packets compress
+    compression_threshold: AtomicU32,
+    /// maximum payload size in bytes
+    max_message_size: u32,
 }
 
 impl SessionRouter {
@@ -277,7 +282,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
-    use crate::config::NetworkConfig;
+    use crate::config::{ManualOverrideRecovery, NetworkConfig};
     use crate::leader::LeaderElection;
     use crate::transport::TransportManager;
     use crate::types::PeerId;
@@ -297,7 +302,7 @@ mod tests {
         let leader = Arc::new(LeaderElection::new(
             local.clone(),
             false,
-            crate::config::ManualOverrideRecovery::Hold,
+            ManualOverrideRecovery::Hold,
             tx,
         ));
         SessionRouter::new(local, Arc::clone(&transport), Arc::clone(&leader), config)

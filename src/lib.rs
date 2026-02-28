@@ -984,8 +984,6 @@ mod tests {
         assert_eq!(result, error::error_codes::OK);
     }
 
-    // --- Handshake version mismatch (raw TCP, forge wrong version) ---
-
     #[tokio::test]
     async fn test_handshake_version_mismatch() {
         use tokio::net::TcpStream;
@@ -1039,8 +1037,6 @@ mod tests {
         node.shutdown().await;
     }
 
-    // --- Handshake timeout (connect but never send Handshake) ---
-
     #[tokio::test]
     async fn test_handshake_timeout() {
         let node = create_node("peer_timeout", "session_to").await;
@@ -1064,17 +1060,16 @@ mod tests {
         node.shutdown().await;
     }
 
-    // --- Max connections ---
-
     #[tokio::test]
     async fn test_max_connections() {
-        use crate::messaging::{decode_internal, encode_internal};
-        use crate::protocol::InternalMessage;
-        use crate::transport::PacketCodec;
-
         use futures_util::{SinkExt, StreamExt};
         use tokio::net::TcpStream;
         use tokio_util::codec::Framed;
+
+        use crate::config::PROTOCOL_VERSION;
+        use crate::messaging::{decode_internal, encode_internal};
+        use crate::protocol::InternalMessage;
+        use crate::transport::PacketCodec;
 
         let node = create_node("peer_main", "session_max").await;
         let addr = format!("127.0.0.1:{}", node.transport.listener_addr().port());
@@ -1091,7 +1086,7 @@ mod tests {
                 &InternalMessage::Handshake {
                     peer_id: format!("peer_{i}"),
                     listen_port: 0,
-                    protocol_version: crate::config::PROTOCOL_VERSION,
+                    protocol_version: PROTOCOL_VERSION,
                     session_id: "session_max".into(),
                 },
                 cfg.max_message_size,
@@ -1117,8 +1112,6 @@ mod tests {
         drop(streams);
         node.shutdown().await;
     }
-
-    // --- Reconnect exponential backoff ---
 
     #[tokio::test]
     async fn test_reconnect_exponential_backoff() {
@@ -1150,8 +1143,6 @@ mod tests {
 
         node_a.shutdown().await;
     }
-
-    // --- 3-node auto leader election (integration) ---
 
     #[tokio::test]
     async fn test_auto_leader_election_3_nodes() {
@@ -1204,8 +1195,6 @@ mod tests {
         n2.shutdown().await;
     }
 
-    // --- 2-node auto leader election ---
-
     #[tokio::test]
     async fn test_auto_leader_election_2_nodes() {
         let config = NetworkConfig {
@@ -1242,8 +1231,6 @@ mod tests {
         n0.shutdown().await;
         n1.shutdown().await;
     }
-
-    // --- Centralized routing ---
 
     #[tokio::test]
     async fn test_centralized_routing() {
@@ -1286,8 +1273,6 @@ mod tests {
         n0.shutdown().await;
         n1.shutdown().await;
     }
-
-    // --- Forward message (Leader only) ---
 
     #[tokio::test]
     async fn test_forward_message() {
@@ -1352,8 +1337,6 @@ mod tests {
         n1.shutdown().await;
     }
 
-    // --- Callback manager direct test ---
-
     #[test]
     fn test_ffi_callbacks() {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -1395,8 +1378,6 @@ mod tests {
         cb.join_thread();
     }
 
-    // --- Concurrent FFI calls ---
-
     #[test]
     fn test_concurrent_ffi_calls() {
         use crate::ffi::*;
@@ -1424,8 +1405,6 @@ mod tests {
         }
     }
 
-    // --- Rapid connect/disconnect ---
-
     #[tokio::test]
     async fn test_rapid_connect_disconnect() {
         let node_a = create_node("peer_a", "session_rapid").await;
@@ -1446,8 +1425,6 @@ mod tests {
         node_a.shutdown().await;
         node_b.shutdown().await;
     }
-
-    // --- Broadcast lagged recovery ---
 
     #[test]
     fn test_broadcast_lagged_recovery() {
@@ -1481,8 +1458,6 @@ mod tests {
         let peers = mgr.get_peer_list();
         assert_eq!(peers.len(), 300);
     }
-
-    // --- Discovery logic tests (no real mDNS needed) ---
 
     #[tokio::test]
     async fn test_discovery_same_session_auto_connect() {
@@ -3806,6 +3781,7 @@ mod tests {
         use tokio::net::TcpStream;
         use tokio_util::codec::Framed;
 
+        use crate::config::PROTOCOL_VERSION;
         use crate::messaging::{decode_internal, encode_internal};
         use crate::protocol::InternalMessage;
         use crate::transport::PacketCodec;
@@ -3835,7 +3811,7 @@ mod tests {
                     &InternalMessage::Handshake {
                         peer_id: format!("mc_c{i}"),
                         listen_port: 0,
-                        protocol_version: crate::config::PROTOCOL_VERSION,
+                        protocol_version: PROTOCOL_VERSION,
                         session_id: session.into(),
                     },
                     NetworkConfig::default().max_message_size,

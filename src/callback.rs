@@ -54,17 +54,21 @@ pub enum CallbackEvent {
 /// The manager holds optional callback pointers behind `Mutex`es
 /// so that registrations can happen at any time without races.
 pub struct CallbackManager {
-    // optional FFI callback pointers protected by mutexes
+    // --- optional FFI callback pointers protected by mutexes for thread-safe registration
+    /// callback for connection results
     connection_result_callback: Arc<Mutex<Option<ConnectionResultCallback>>>,
+    /// callback for leader changes
     leader_changed_callback: Arc<Mutex<Option<LeaderChangedCallback>>>,
+    /// callback for peer status changes
     peer_status_callback: Arc<Mutex<Option<PeerStatusCallback>>>,
+    /// callback for received messages
     receive_callback: Arc<Mutex<Option<ReceiveCallback>>>,
 
-    // handle of the thread running `callback_loop`
+    /// handle of the thread running `callback_loop`
     callback_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
-    // channel used to send events to the callback thread
+    /// channel used to send events to the callback thread
     event_tx: Mutex<Option<mpsc::Sender<CallbackEvent>>>,
-    // shared flag used to signal shutdown of the thread
+    /// shared flag used to signal shutdown of the thread
     shutdown: Arc<AtomicBool>,
 }
 
@@ -74,24 +78,22 @@ impl CallbackManager {
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::channel(1024);
 
-        // initially no callbacks registered
-        let connection_result_cb: Arc<Mutex<Option<ConnectionResultCallback>>> =
+        let connection_result_callback: Arc<Mutex<Option<ConnectionResultCallback>>> =
             Arc::new(Mutex::new(None));
-        let leader_changed_cb: Arc<Mutex<Option<LeaderChangedCallback>>> =
+        let leader_changed_callback: Arc<Mutex<Option<LeaderChangedCallback>>> =
             Arc::new(Mutex::new(None));
-        let peer_status_cb: Arc<Mutex<Option<PeerStatusCallback>>> = Arc::new(Mutex::new(None));
-        let receive_cb: Arc<Mutex<Option<ReceiveCallback>>> = Arc::new(Mutex::new(None));
+        let peer_status_callback: Arc<Mutex<Option<PeerStatusCallback>>> =
+            Arc::new(Mutex::new(None));
+        let receive_callback: Arc<Mutex<Option<ReceiveCallback>>> = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        // clone arcs for the thread
-        let thread_connection_result = Arc::clone(&connection_result_cb);
-        let thread_leader_changed = Arc::clone(&leader_changed_cb);
-        let thread_peer_status = Arc::clone(&peer_status_cb);
-        let thread_receive = Arc::clone(&receive_cb);
+        let thread_connection_result = Arc::clone(&connection_result_callback);
+        let thread_leader_changed = Arc::clone(&leader_changed_callback);
+        let thread_peer_status = Arc::clone(&peer_status_callback);
+        let thread_receive = Arc::clone(&receive_callback);
         let thread_shutdown = Arc::clone(&shutdown);
 
         let handle = std::thread::spawn(move || {
-            // the loop that runs on the dedicated thread
             Self::callback_loop(
                 event_rx,
                 thread_connection_result,
@@ -103,10 +105,10 @@ impl CallbackManager {
         });
 
         Self {
-            connection_result_callback: connection_result_cb,
-            leader_changed_callback: leader_changed_cb,
-            peer_status_callback: peer_status_cb,
-            receive_callback: receive_cb,
+            connection_result_callback,
+            leader_changed_callback,
+            peer_status_callback,
+            receive_callback,
             callback_thread: Mutex::new(Some(handle)),
             event_tx: Mutex::new(Some(event_tx)),
             shutdown,
@@ -118,10 +120,10 @@ impl CallbackManager {
     /// the sender is dropped or a shutdown flag is set.
     fn callback_loop(
         mut event_rx: mpsc::Receiver<CallbackEvent>,
-        connection_result_cb: Arc<Mutex<Option<ConnectionResultCallback>>>,
-        leader_changed_cb: Arc<Mutex<Option<LeaderChangedCallback>>>,
-        peer_status_cb: Arc<Mutex<Option<PeerStatusCallback>>>,
-        receive_cb: Arc<Mutex<Option<ReceiveCallback>>>,
+        connection_result_callback: Arc<Mutex<Option<ConnectionResultCallback>>>,
+        leader_changed_callback: Arc<Mutex<Option<LeaderChangedCallback>>>,
+        peer_status_callback: Arc<Mutex<Option<PeerStatusCallback>>>,
+        receive_callback: Arc<Mutex<Option<ReceiveCallback>>>,
         shutdown: Arc<AtomicBool>,
     ) {
         while !shutdown.load(Ordering::Relaxed) {
@@ -129,10 +131,10 @@ impl CallbackManager {
                 Some(event) => {
                     Self::dispatch_event(
                         &event,
-                        &connection_result_cb,
-                        &leader_changed_cb,
-                        &peer_status_cb,
-                        &receive_cb,
+                        &connection_result_callback,
+                        &leader_changed_callback,
+                        &peer_status_callback,
+                        &receive_callback,
                     );
                 }
                 None => break, // channel closed
@@ -146,10 +148,10 @@ impl CallbackManager {
     /// unsafe function pointer.
     fn dispatch_event(
         event: &CallbackEvent,
-        connection_result_cb: &Arc<Mutex<Option<ConnectionResultCallback>>>,
-        leader_changed_cb: &Arc<Mutex<Option<LeaderChangedCallback>>>,
-        peer_status_cb: &Arc<Mutex<Option<PeerStatusCallback>>>,
-        receive_cb: &Arc<Mutex<Option<ReceiveCallback>>>,
+        connection_result_callback: &Arc<Mutex<Option<ConnectionResultCallback>>>,
+        leader_changed_callback: &Arc<Mutex<Option<LeaderChangedCallback>>>,
+        peer_status_callback: &Arc<Mutex<Option<PeerStatusCallback>>>,
+        receive_callback: &Arc<Mutex<Option<ReceiveCallback>>>,
     ) {
         match event {
             CallbackEvent::ConnectionResult {
@@ -157,7 +159,7 @@ impl CallbackManager {
                 success,
                 error_code,
             } => {
-                let cb = *connection_result_cb.lock();
+                let cb = *connection_result_callback.lock();
                 if let Some(cb) = cb
                     && let Ok(c_addr) = CString::new(addr.as_str())
                 {
@@ -167,7 +169,7 @@ impl CallbackManager {
                 }
             }
             CallbackEvent::LeaderChanged { leader_id } => {
-                let cb = *leader_changed_cb.lock();
+                let cb = *leader_changed_callback.lock();
                 if let Some(cb) = cb {
                     let leader_str = leader_id.as_deref().unwrap_or("");
                     if let Ok(c_leader) = CString::new(leader_str) {
@@ -178,7 +180,7 @@ impl CallbackManager {
                 }
             }
             CallbackEvent::PeerStatusChanged { peer_id, status } => {
-                let cb = *peer_status_cb.lock();
+                let cb = *peer_status_callback.lock();
                 if let Some(cb) = cb
                     && let Ok(c_peer) = CString::new(peer_id.as_str())
                 {
@@ -193,7 +195,7 @@ impl CallbackManager {
                 msg_type,
                 flags,
             } => {
-                let cb = *receive_cb.lock();
+                let cb = *receive_callback.lock();
                 if let Some(cb) = cb
                     && let Ok(c_peer) = CString::new(peer_id.as_str())
                 {

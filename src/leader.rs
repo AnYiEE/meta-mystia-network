@@ -20,19 +20,28 @@ pub enum Role {
 
 /// Internal state guarded by the `RwLock`. Grouped by purpose.
 struct ElectionState {
-    // persistent term/role information
+    // --- persistent term/role information --------------------------------
+    /// current role (Follower/Candidate/Leader)
     role: Role,
+    /// current election term, incremented on new elections or manual leader assignment
     current_term: u64,
 
-    // voting state for current term
+    // --- voting state for current term -----------------------------------
+    /// candidate this node voted for in the current term (if any)
     voted_for: Option<PeerId>,
+    /// set of peer IDs that have voted for this node in the current term
     votes_received: HashSet<PeerId>,
 
-    // known leader for this term (if any)
+    /// known leader for this term (if any)
     leader_id: Option<PeerId>,
 
-    // configuration toggles
+    // --- configuration toggles and overrides -----------------------------
+    /// when `manual_override` is active, automatic elections are blocked and
+    /// leader changes only occur via `SetLeader` or `handle_leader_assign`.
     auto_election_enabled: bool,
+    /// when true, automatic elections are blocked and leader changes only occur
+    /// via `SetLeader` or `handle_leader_assign`. This is set implicitly when a leader is manually assigned, but can
+    /// also be toggled independently to allow manual control without a specific leader in place.
     manual_override: bool,
 }
 
@@ -41,16 +50,13 @@ struct ElectionState {
 /// connected peers and sends leader change notifications via the
 /// provided channel.
 pub struct LeaderElection {
-    // identity
+    /// identity of this node
     local_peer_id: PeerId,
-
-    // shared election state
+    /// shared election state
     state: RwLock<ElectionState>,
-
-    // outgoing notifications when leader changes (Some(id) or None)
+    /// outgoing notifications when leader changes (Some(id) or None)
     leader_change_tx: mpsc::Sender<Option<PeerId>>,
-
-    // what to do when a manually-assigned leader goes offline
+    /// what to do when a manually-assigned leader goes offline
     manual_override_recovery: ManualOverrideRecovery,
 }
 

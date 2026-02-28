@@ -1288,7 +1288,7 @@ public class NetworkTests
     while (sw.ElapsedMilliseconds < timeoutMs)
     {
       if (lines.TryDequeue(out var line) && line.StartsWith(prefix))
-        return line.Substring(prefix.Length);
+        return line[prefix.Length..];
       Thread.Sleep(50);
     }
     Assert.True(false, $"Timed out waiting for stdout line with prefix '{prefix}'");

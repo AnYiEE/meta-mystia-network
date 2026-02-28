@@ -104,7 +104,7 @@ class PeerHelperProgram
             break;
 
           case NetworkEventType.Message:
-            string b64 = Convert.ToBase64String(ev.Data ?? Array.Empty<byte>());
+            string b64 = Convert.ToBase64String(ev.Data ?? []);
             Console.WriteLine($"RECV:{ev.PeerId}:{ev.MsgType}:{b64}");
             Console.Out.Flush();
             break;
@@ -155,13 +155,13 @@ class PeerHelperProgram
   {
     if (cmd.StartsWith("CONNECT:"))
     {
-      string target = cmd.Substring("CONNECT:".Length);
+      string target = cmd["CONNECT:".Length..];
       MetaMystiaNetwork.ConnectToPeer(target);
     }
     else if (cmd.StartsWith("SEND:"))
     {
       // SEND:{msgType}:{base64payload}
-      var parts = cmd.Substring("SEND:".Length).Split(':', 2);
+      var parts = cmd["SEND:".Length..].Split(':', 2);
       if (parts.Length == 2 && ushort.TryParse(parts[0], out ushort mt))
       {
         byte[] data = Convert.FromBase64String(parts[1]);
@@ -171,7 +171,7 @@ class PeerHelperProgram
     else if (cmd.StartsWith("SENDTO:"))
     {
       // SENDTO:{peerId}:{msgType}:{base64payload}
-      var parts = cmd.Substring("SENDTO:".Length).Split(':', 3);
+      var parts = cmd["SENDTO:".Length..].Split(':', 3);
       if (parts.Length == 3 && ushort.TryParse(parts[1], out ushort mt))
       {
         byte[] data = Convert.FromBase64String(parts[2]);

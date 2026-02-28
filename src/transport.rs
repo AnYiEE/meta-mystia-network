@@ -861,9 +861,9 @@ impl TransportManager {
 mod tests {
     use super::*;
 
-    use crate::config::NetworkConfig;
-
     use bytes::Bytes;
+
+    use crate::config::NetworkConfig;
 
     /// Create a TransportManager for testing.
     async fn make_transport(

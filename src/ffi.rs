@@ -15,7 +15,7 @@ use crate::NetworkState;
 use crate::callback::{
     ConnectionResultCallback, LeaderChangedCallback, PeerStatusCallback, ReceiveCallback,
 };
-use crate::config::NetworkConfig;
+use crate::config::{ManualOverrideRecovery, NetworkConfig};
 use crate::error::NetworkError;
 use crate::error::error_codes;
 use crate::messaging::encode_internal;
@@ -166,9 +166,7 @@ impl From<&NetworkConfigFFI> for NetworkConfig {
             mdns_port: ffi.mdns_port,
             centralized_auto_forward: ffi.centralized_auto_forward != 0,
             auto_election_enabled: ffi.auto_election_enabled != 0,
-            manual_override_recovery: crate::config::ManualOverrideRecovery::from_u8(
-                ffi.manual_override_recovery,
-            ),
+            manual_override_recovery: ManualOverrideRecovery::from_u8(ffi.manual_override_recovery),
         }
     }
 }
@@ -1071,7 +1069,6 @@ pub extern "C" fn EnableLogging(enable: u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // CString imported when needed by individual tests
 
     #[test]
     fn test_c_str_to_string_null() {
