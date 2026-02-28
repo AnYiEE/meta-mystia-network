@@ -7,11 +7,13 @@ description = "A P2P network library for MetaMystia Mod (https://github.com/Meta
 license = "AGPL-3.0-only"
 
 [profile.release]
+debug = true
 codegen-units = 1
+incremental = true
 lto = true
-opt-level = "z"
-panic = "abort"
-strip = "symbols"
+opt-level = "s"
+split-debuginfo = "packed"
+strip = true
 
 [features]
 default = []

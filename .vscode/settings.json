@@ -28,6 +28,7 @@
     "CONNRESULT",
     "cref",
     "cstring",
+    "debuginfo",
     "Dnscache",
     "dont",
     "dumpbin",
