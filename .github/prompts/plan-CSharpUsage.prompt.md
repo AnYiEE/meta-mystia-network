@@ -421,7 +421,6 @@ public static class MetaMystiaNetwork
 | **字符串指针即用即拷**      | `GetLocalAddr()` 等返回的 `IntPtr` 仅在下一次返回字符串的 FFI 调用前有效。立即用 `PtrToString()` 拷贝。                                               |
 | **回调内禁止调 FFI**        | 回调在 Rust 线程触发（非 Unity 主线程）。回调内不得调用任何 FFI 函数（如 `SendToPeer`），否则死锁。将事件入队 `ConcurrentQueue`，由 `Update()` 消费。 |
 | **回调内同步拷贝数据**      | 回调参数的指针（`peerId`、`data`）在回调返回后被 Rust 释放。必须在回调体内完成 `Marshal.PtrToStringAnsi()` 和 `Marshal.Copy()`。                      |
-
 | **PeerStatus 值范围** | `PeerStatusCallback` 返回的状态是 0=Connected、1=Disconnected、2=Reconnecting、3=Handshaking（握手中）。请在 C# 枚举中保持一致。 |
 | **保持委托引用** | 传给 `Register*Callback` 的委托必须保存为 **静态字段**，防止 GC 回收导致野指针崩溃。 |
 | **`[AOT.MonoPInvokeCallback]`** | IL2CPP 要求所有从 native 调用的回调方法标记此特性，否则 AOT 编译不生成跳板代码。 |
@@ -612,12 +611,12 @@ bool iAmLeader = MetaMystiaNetwork.IsLeader() != 0;
 int rtt = MetaMystiaNetwork.GetPeerRTT("some_peer"); // -1 = 未知
 
 // ----- Leader 管理 -----
-MetaMystiaNetwork.SetLeader("player_abc");            // 手动指定
-MetaMystiaNetwork.EnableAutoLeaderElection(0);         // 禁用自动选举
+MetaMystiaNetwork.SetLeader("player_abc");     // 手动指定
+MetaMystiaNetwork.EnableAutoLeaderElection(0); // 禁用自动选举
 
 // ----- 中心化模式 -----
-MetaMystiaNetwork.SetCentralizedMode(1);               // 所有广播经 Leader 中转
-MetaMystiaNetwork.SetCentralizedAutoForward(0);        // Leader 不自动转发，由 C# 决定
+MetaMystiaNetwork.SetCentralizedMode(1);        // 所有广播经 Leader 中转
+MetaMystiaNetwork.SetCentralizedAutoForward(0); // Leader 不自动转发，由 C# 决定
 MetaMystiaNetwork.ForwardMessage("from_id", null, data, data.Length, msgType, 0);
 //                                          ↑ null = 广播给除 from 外的所有 peer
 
