@@ -1,9 +1,9 @@
 [package]
 name = "meta-mystia-network"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["AnYiEE <i@anyi.in>"]
 edition = "2024"
-description = "A P2P network library for MetaMystia Mod (https://github.com/MetaMikuAI/MetaMystia). Repository: https://github.com/AnYiEE/meta-mystia-network"
+description = "A lightweight P2P network library. Repository: https://github.com/AnYiEE/meta-mystia-network"
 license = "AGPL-3.0-only"
 
 [profile.release]
