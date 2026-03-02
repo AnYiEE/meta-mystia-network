@@ -200,24 +200,23 @@ impl TransportManager {
         }
     }
 
-    /// Apply platform-specific TCP keepalive settings to a stream.
-    /// Used for both incoming and outgoing connections to detect
-    /// dead peers. Optionally disables Nagle's algorithm when
-    /// `tcp_nodelay` is `true`.
-    fn configure_socket(stream: &TcpStream, tcp_nodelay: bool) -> Result<(), NetworkError> {
+    /// Apply platform-specific TCP keepalive and optional
+    /// `TCP_NODELAY` settings to a stream. Used for both incoming
+    /// and outgoing connections to detect dead peers.
+    fn configure_socket(stream: &TcpStream, config: &NetworkConfig) -> Result<(), NetworkError> {
         use socket2::SockRef;
 
         let sock = SockRef::from(stream);
         let keepalive = socket2::TcpKeepalive::new()
-            .with_time(Duration::from_secs(60))
-            .with_interval(Duration::from_secs(10));
+            .with_time(Duration::from_secs(config.keepalive_time_secs.into()))
+            .with_interval(Duration::from_secs(config.keepalive_interval_secs.into()));
 
         #[cfg(not(target_os = "windows"))]
-        let keepalive = keepalive.with_retries(3);
+        let keepalive = keepalive.with_retries(config.keepalive_retries);
 
         sock.set_tcp_keepalive(&keepalive)?;
 
-        if tcp_nodelay {
+        if config.tcp_nodelay {
             stream.set_nodelay(true)?;
         }
 
@@ -232,7 +231,7 @@ impl TransportManager {
         stream: TcpStream,
         addr: SocketAddr,
     ) -> Result<(), NetworkError> {
-        Self::configure_socket(&stream, self.config.tcp_nodelay)?;
+        Self::configure_socket(&stream, &self.config)?;
 
         let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
 
@@ -409,7 +408,7 @@ impl TransportManager {
         .map_err(|_| NetworkError::HandshakeTimeout)?
         .map_err(|e| NetworkError::ConnectionFailed(format!("TCP connect failed: {e}")))?;
 
-        Self::configure_socket(&stream, self.config.tcp_nodelay)?;
+        Self::configure_socket(&stream, &self.config)?;
 
         let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
 

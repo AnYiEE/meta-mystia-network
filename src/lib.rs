@@ -938,6 +938,9 @@ mod tests {
             tcp_nodelay: 0,
             _padding: [0; 2],
             handshake_timeout_ms: d.handshake_timeout_ms,
+            keepalive_time_secs: d.keepalive_time_secs,
+            keepalive_interval_secs: d.keepalive_interval_secs,
+            keepalive_retries: d.keepalive_retries,
         };
 
         let r =
@@ -4381,6 +4384,9 @@ mod tests {
             tcp_nodelay: 1,
             _padding: [0; 2],
             handshake_timeout_ms: d.handshake_timeout_ms,
+            keepalive_time_secs: d.keepalive_time_secs,
+            keepalive_interval_secs: d.keepalive_interval_secs,
+            keepalive_retries: d.keepalive_retries,
         };
 
         let cfg = NetworkConfig::from(&ffi);
@@ -4398,8 +4404,115 @@ mod tests {
     fn test_ffi_config_size_unchanged() {
         assert_eq!(
             std::mem::size_of::<crate::ffi::NetworkConfigFFI>(),
-            80,
-            "NetworkConfigFFI must remain 80 bytes for ABI compatibility"
+            96,
+            "NetworkConfigFFI must remain 96 bytes for ABI compatibility"
         );
+    }
+
+    /// Verify default keepalive config values.
+    #[test]
+    fn test_keepalive_defaults() {
+        let cfg = NetworkConfig::default();
+        assert_eq!(cfg.keepalive_time_secs, 60);
+        assert_eq!(cfg.keepalive_interval_secs, 10);
+        assert_eq!(cfg.keepalive_retries, 3);
+    }
+
+    /// Validation rejects zero keepalive values.
+    #[test]
+    fn test_keepalive_validation() {
+        let cfg = NetworkConfig {
+            keepalive_time_secs: 0,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        let cfg = NetworkConfig {
+            keepalive_interval_secs: 0,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        let cfg = NetworkConfig {
+            keepalive_retries: 0,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        assert!(NetworkConfig::default().validate().is_ok());
+    }
+
+    /// FFI round-trip for keepalive fields.
+    #[test]
+    fn test_ffi_keepalive_roundtrip() {
+        use crate::ffi::NetworkConfigFFI;
+
+        let d = NetworkConfig::default();
+        let ffi = NetworkConfigFFI {
+            heartbeat_interval_ms: d.heartbeat_interval_ms,
+            election_timeout_min_ms: d.election_timeout_min_ms,
+            election_timeout_max_ms: d.election_timeout_max_ms,
+            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
+            reconnect_initial_ms: d.reconnect_initial_ms,
+            reconnect_max_ms: d.reconnect_max_ms,
+            compression_threshold: d.compression_threshold,
+            send_queue_capacity: d.send_queue_capacity as u32,
+            max_connections: d.max_connections as u32,
+            max_message_size: d.max_message_size,
+            centralized_auto_forward: 1,
+            auto_election_enabled: 1,
+            mdns_port: d.mdns_port,
+            manual_override_recovery: 0,
+            tcp_nodelay: 0,
+            _padding: [0; 2],
+            handshake_timeout_ms: d.handshake_timeout_ms,
+            keepalive_time_secs: 30,
+            keepalive_interval_secs: 5,
+            keepalive_retries: 5,
+        };
+
+        let cfg = NetworkConfig::from(&ffi);
+        assert_eq!(cfg.keepalive_time_secs, 30);
+        assert_eq!(cfg.keepalive_interval_secs, 5);
+        assert_eq!(cfg.keepalive_retries, 5);
+    }
+
+    /// Nodes with custom keepalive settings connect and exchange successfully.
+    #[tokio::test]
+    async fn test_custom_keepalive_connect_and_exchange() {
+        let config = NetworkConfig {
+            keepalive_time_secs: 30,
+            keepalive_interval_secs: 5,
+            keepalive_retries: 5,
+            ..Default::default()
+        };
+
+        let node_a = NetworkState::new("ka_a".into(), "session_ka".into(), config)
+            .await
+            .unwrap();
+        let node_b = NetworkState::new("ka_b".into(), "session_ka".into(), config)
+            .await
+            .unwrap();
+
+        connect_nodes(&node_a, &node_b).await;
+        assert!(
+            wait_until(|| node_a.membership.has_peer(&PeerId::new("ka_b")), 3_000).await,
+            "node_a should discover node_b with custom keepalive"
+        );
+
+        node_a
+            .session_router
+            .route_message(
+                types::MessageTarget::ToPeer(PeerId::new("ka_b")),
+                0x0100,
+                b"hello_keepalive",
+                0,
+            )
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        node_a.shutdown().await;
+        node_b.shutdown().await;
     }
 }

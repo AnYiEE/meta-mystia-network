@@ -67,7 +67,11 @@
 | `test_ffi_error_codes_not_initialized`                        | 未初始化时调用 FFI 返回正确错误码                                      |
 | `test_ffi_full_lifecycle`                                     | FFI 完整生命周期：initialize→connect→send→shutdown                     |
 | `test_ffi_tcp_nodelay_roundtrip`                              | FFI `tcp_nodelay` 字段 0/1 → `NetworkConfig::tcp_nodelay` bool 转换    |
-| `test_ffi_config_size_unchanged`                              | `NetworkConfigFFI` 结构体大小保持 80 字节                              |
+| `test_ffi_config_size_unchanged`                              | `NetworkConfigFFI` 结构体大小保持 96 字节                              |
+| `test_keepalive_defaults`                                     | 默认 keepalive 配置值为 60/10/3                                        |
+| `test_keepalive_validation`                                   | keepalive 字段为 0 时校验失败                                          |
+| `test_ffi_keepalive_roundtrip`                                | FFI keepalive 字段往返映射正确                                         |
+| `test_custom_keepalive_connect_and_exchange`                  | 自定义 keepalive 参数下节点连接与消息收发                              |
 | `test_concurrent_ffi_calls`                                   | 多线程 FFI 调用安全                                                    |
 | `test_graceful_shutdown`                                      | PeerLeave + 资源清理                                                   |
 | `test_shutdown_reinitialize`                                  | Shutdown 后可再次 Initialize                                           |

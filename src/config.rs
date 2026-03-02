@@ -96,6 +96,18 @@ pub struct NetworkConfig {
     /// TCP connection. This reduces latency for small messages at the
     /// cost of slightly higher bandwidth usage. Default: `false`.
     pub tcp_nodelay: bool,
+
+    // --- TCP keepalive ---------------------------------------------------
+    /// idle time (seconds) before the first keepalive probe is sent.
+    /// Default: `60`.
+    pub keepalive_time_secs: u32,
+    /// interval (seconds) between successive keepalive probes once
+    /// the idle threshold is reached. Default: `10`.
+    pub keepalive_interval_secs: u32,
+    /// number of unacknowledged keepalive probes before the
+    /// connection is considered dead. **Ignored on Windows** which
+    /// does not expose `TCP_KEEPCNT`. Default: `3`.
+    pub keepalive_retries: u32,
 }
 
 impl Default for NetworkConfig {
@@ -117,6 +129,9 @@ impl Default for NetworkConfig {
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
             tcp_nodelay: false,
+            keepalive_time_secs: 60,
+            keepalive_interval_secs: 10,
+            keepalive_retries: 3,
         }
     }
 }
@@ -156,6 +171,15 @@ impl NetworkConfig {
         }
         if self.handshake_timeout_ms == 0 {
             return e("handshake_timeout_ms must be > 0");
+        }
+        if self.keepalive_time_secs == 0 {
+            return e("keepalive_time_secs must be > 0");
+        }
+        if self.keepalive_interval_secs == 0 {
+            return e("keepalive_interval_secs must be > 0");
+        }
+        if self.keepalive_retries == 0 {
+            return e("keepalive_retries must be > 0");
         }
 
         Ok(())
@@ -234,6 +258,9 @@ mod tests {
     #[test]
     fn test_tcp_nodelay_default_in_config() {
         let cfg = NetworkConfig::default();
-        assert!(!cfg.tcp_nodelay, "tcp_nodelay should default to false (Nagle enabled)");
+        assert!(
+            !cfg.tcp_nodelay,
+            "tcp_nodelay should default to false (Nagle enabled)"
+        );
     }
 }

@@ -189,7 +189,7 @@ namespace MetaMystiaNetworkBindings
   /// <para>
   /// The field layout is <c>#[repr(C)]</c>-compatible with the Rust struct.
   /// <b>Do not reorder fields or change types</b> without also updating the Rust
-  /// side. The struct occupies exactly 80 bytes:
+  /// side. The struct occupies exactly 96 bytes:
   /// </para>
   /// <code>
   ///  offset  0  heartbeat_interval_ms        u64  (8 B)
@@ -210,7 +210,11 @@ namespace MetaMystiaNetworkBindings
   ///  offset 69  tcp_nodelay                  u8   (1 B)
   ///  offset 70  [2 B alignment padding]
   ///  offset 72  handshake_timeout_ms         u64  (8 B)
-  ///  sizeof = 80
+  ///  offset 80  keepalive_time_secs          u32  (4 B)
+  ///  offset 84  keepalive_interval_secs      u32  (4 B)
+  ///  offset 88  keepalive_retries            u32  (4 B)
+  ///  offset 92  [4 B implicit padding — struct alignment]
+  ///  sizeof = 96
   /// </code>
   /// </remarks>
   [StructLayout(LayoutKind.Sequential)]
@@ -251,14 +255,14 @@ namespace MetaMystiaNetworkBindings
     public uint compression_threshold;
 
     /// <summary>
-    /// Capacity of each peer's outbound send queue (packets). Must be 0.
+    /// Capacity of each peer's outbound send queue (packets). Must be > 0.
     /// Exceeding the capacity returns <see cref="NetErrorCode.SendQueueFull"/>.
     /// Default: 128.
     /// </summary>
     public uint send_queue_capacity;
 
     /// <summary>
-    /// Maximum number of simultaneous TCP connections. Must be 0.
+    /// Maximum number of simultaneous TCP connections. Must be > 0.
     /// Exceeding this limit returns <see cref="NetErrorCode.MaxConnectionsReached"/>.
     /// Default: 64.
     /// </summary>
@@ -310,9 +314,28 @@ namespace MetaMystiaNetworkBindings
 
     /// <summary>
     /// Timeout (ms) to complete the TCP handshake with a remote peer.
-    /// Must be 0. Default: 5000.
+    /// Must be > 0. Default: 5000.
     /// </summary>
     public ulong handshake_timeout_ms;
+
+    /// <summary>
+    /// Idle time (seconds) before the first TCP keepalive probe is sent.
+    /// Must be > 0. Default: 60.
+    /// </summary>
+    public uint keepalive_time_secs;
+
+    /// <summary>
+    /// Interval (seconds) between successive TCP keepalive probes once
+    /// the idle threshold is reached. Must be > 0. Default: 10.
+    /// </summary>
+    public uint keepalive_interval_secs;
+
+    /// <summary>
+    /// Number of unacknowledged keepalive probes before the connection is
+    /// considered dead. <b>Ignored on Windows</b> which does not expose
+    /// <c>TCP_KEEPCNT</c>. Must be > 0. Default: 3.
+    /// </summary>
+    public uint keepalive_retries;
 
     /// <summary>
     /// Returns a <see cref="NetworkConfigFFI"/> pre-filled with the same defaults
@@ -336,6 +359,9 @@ namespace MetaMystiaNetworkBindings
       manual_override_recovery = (byte)ManualOverrideRecovery.Hold,
       tcp_nodelay = 0,
       handshake_timeout_ms = 5000,
+      keepalive_time_secs = 60,
+      keepalive_interval_secs = 10,
+      keepalive_retries = 3,
     };
   }
 

@@ -94,6 +94,12 @@ pub struct NetworkConfig {
     pub handshake_timeout_ms: u64,
     /// mDNS 发现端口，默认 15353
     pub mdns_port: u16,
+    /// TCP Keep-alive 空闲时间（秒），空闲多久后发送首个探测包，默认 60
+    pub keepalive_time_secs: u32,
+    /// TCP Keep-alive 探测间隔（秒），默认 10
+    pub keepalive_interval_secs: u32,
+    /// TCP Keep-alive 探测重试次数，默认 3（Windows 上无效，仅 macOS/Linux）
+    pub keepalive_retries: u32,
 }
 
 impl Default for NetworkConfig {
@@ -115,6 +121,9 @@ impl Default for NetworkConfig {
             max_connections: 64,
             handshake_timeout_ms: 5000,
             mdns_port: 15353,
+            keepalive_time_secs: 60,
+            keepalive_interval_secs: 10,
+            keepalive_retries: 3,
         }
     }
 }
@@ -122,7 +131,8 @@ impl Default for NetworkConfig {
 impl NetworkConfig {
     /// 验证配置合理性，返回第一个发现的错误。
     /// 约束：heartbeat > 0, election_min > heartbeat, election_min ≤ election_max,
-    /// timeout_multiplier > 0, reconnect_initial > 0 且 ≤ reconnect_max, queue > 0
+    /// timeout_multiplier > 0, reconnect_initial > 0 且 ≤ reconnect_max, queue > 0,
+    /// keepalive_time_secs > 0, keepalive_interval_secs > 0, keepalive_retries > 0
     pub fn validate(&self) -> Result<(), NetworkError> { /* 逐项检查上述约束 */ }
 }
 ```

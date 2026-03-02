@@ -131,6 +131,12 @@ public struct NetworkConfigFFI
     private byte _padding2;
     /// <summary>握手超时（ms）。默认 5000</summary>
     public ulong handshake_timeout_ms;
+    /// <summary>TCP Keep-alive 空闲时间（秒），空闲多久后发送首个探测包。默认 60</summary>
+    public uint  keepalive_time_secs;
+    /// <summary>TCP Keep-alive 探测间隔（秒）。默认 10</summary>
+    public uint  keepalive_interval_secs;
+    /// <summary>TCP Keep-alive 探测重试次数，Windows 上无效。默认 3</summary>
+    public uint  keepalive_retries;
 
     /// <summary>返回所有字段为默认值的配置实例。</summary>
     public static NetworkConfigFFI Default() => new()
@@ -151,6 +157,9 @@ public struct NetworkConfigFFI
         manual_override_recovery = 0,
         tcp_nodelay = 0,
         handshake_timeout_ms = 5000,
+        keepalive_time_secs = 60,
+        keepalive_interval_secs = 10,
+        keepalive_retries = 3,
     };
 }
 ```

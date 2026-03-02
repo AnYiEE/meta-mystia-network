@@ -569,12 +569,16 @@ public class NetworkTests
     // 69  tcp_nodelay                  u8  → 1
     // 70  [2 bytes alignment padding – next field is u64]
     // 72  handshake_timeout_ms         u64 → 8
-    // total = 80 bytes
+    // 80  keepalive_time_secs          u32 → 4
+    // 84  keepalive_interval_secs      u32 → 4
+    // 88  keepalive_retries            u32 → 4
+    // 92  [4 bytes implicit padding – struct alignment]
+    // total = 96 bytes
     //
-    // C# LayoutKind.Sequential obeys the same rules and also produces 80 bytes.
+    // C# LayoutKind.Sequential obeys the same rules and also produces 96 bytes.
     // If this test fails, a field type or order was changed in a way that breaks
     // the FFI ABI with the Rust side.
-    Assert.Equal(80, Marshal.SizeOf<NetworkConfigFFI>());
+    Assert.Equal(96, Marshal.SizeOf<NetworkConfigFFI>());
   }
 
   // --- 21. ManualOverrideRecovery enum values ----------------------------
@@ -639,6 +643,34 @@ public class NetworkTests
     cfg.tcp_nodelay = 1;
     MetaMystiaNetwork.Check(
         MetaMystiaNetwork.InitializeNetworkWithConfig("nd_peer", "session", ref cfg));
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.ShutdownNetwork());
+  }
+
+  // --- 24d. keepalive config defaults -----------------------------------
+
+  [Fact]
+  public void ConfigDefaultKeepaliveValues()
+  {
+    var cfg = NetworkConfigFFI.Default();
+    Assert.Equal(60u, cfg.keepalive_time_secs);
+    Assert.Equal(10u, cfg.keepalive_interval_secs);
+    Assert.Equal(3u, cfg.keepalive_retries);
+  }
+
+  // --- 24e. Init with custom keepalive settings succeeds ----------------
+
+  [Fact]
+  public void ConfigWithCustomKeepalive()
+  {
+    EnsureShutdown();
+
+    var cfg = NetworkConfigFFI.Default();
+    cfg.keepalive_time_secs = 30;
+    cfg.keepalive_interval_secs = 5;
+    cfg.keepalive_retries = 5;
+    MetaMystiaNetwork.Check(
+        MetaMystiaNetwork.InitializeNetworkWithConfig("ka_peer", "session", ref cfg));
 
     MetaMystiaNetwork.Check(MetaMystiaNetwork.ShutdownNetwork());
   }

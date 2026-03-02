@@ -88,7 +88,7 @@ where
 /// the Rust `NetworkConfig` and groups timing, sizing and feature
 /// toggle parameters together.
 ///
-/// # Layout (80 bytes, 8-byte aligned)
+/// # Layout (96 bytes, 8-byte aligned)
 ///
 /// ```text
 /// offset  0  heartbeat_interval_ms        u64  (8 B)
@@ -109,7 +109,11 @@ where
 /// offset 69  tcp_nodelay                  u8   (1 B)
 /// offset 70  [2 B explicit padding]
 /// offset 72  handshake_timeout_ms         u64  (8 B)
-/// sizeof = 80
+/// offset 80  keepalive_time_secs          u32  (4 B)
+/// offset 84  keepalive_interval_secs      u32  (4 B)
+/// offset 88  keepalive_retries            u32  (4 B)
+/// offset 92  [4 B implicit padding — struct alignment]
+/// sizeof = 96
 /// ```
 #[repr(C)]
 pub struct NetworkConfigFFI {
@@ -151,6 +155,11 @@ pub struct NetworkConfigFFI {
 
     // handshake timeout
     pub handshake_timeout_ms: u64,
+
+    // TCP keepalive parameters
+    pub keepalive_time_secs: u32,
+    pub keepalive_interval_secs: u32,
+    pub keepalive_retries: u32,
 }
 
 impl From<&NetworkConfigFFI> for NetworkConfig {
@@ -172,6 +181,9 @@ impl From<&NetworkConfigFFI> for NetworkConfig {
             auto_election_enabled: ffi.auto_election_enabled != 0,
             manual_override_recovery: ManualOverrideRecovery::from_u8(ffi.manual_override_recovery),
             tcp_nodelay: ffi.tcp_nodelay != 0,
+            keepalive_time_secs: ffi.keepalive_time_secs,
+            keepalive_interval_secs: ffi.keepalive_interval_secs,
+            keepalive_retries: ffi.keepalive_retries,
         }
     }
 }

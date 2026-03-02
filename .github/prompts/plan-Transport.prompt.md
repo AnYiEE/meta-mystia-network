@@ -170,10 +170,12 @@ impl Encoder<RawPacket> for PacketCodec {
    - `accept` 循环，每个新连接 spawn 到 `handle_incoming_connection`
    - 连接数达到 `config.max_connections` 时拒绝新连接
 
-2. **TCP Keep-alive**：
+2. **TCP Keep-alive（可配置）**：
    - 使用 `socket2` crate 设置 TCP 层 Keep-alive
-   - `keepalive_time = 60s`，`keepalive_interval = 10s`
-   - `keepalive_retries = 3`（**仅 macOS/Linux**；Windows 无 `TCP_KEEPCNT`，跳过此设置而非报错）
+   - `keepalive_time` = `config.keepalive_time_secs`（默认 60s）
+   - `keepalive_interval` = `config.keepalive_interval_secs`（默认 10s）
+   - `keepalive_retries` = `config.keepalive_retries`（默认 3，**仅 macOS/Linux**；Windows 无 `TCP_KEEPCNT`，跳过此设置而非报错）
+   - 三个参数均由 `NetworkConfig` 字段控制，上层可通过 FFI 配置
 
 2b. **TCP_NODELAY（可选）**：
 
@@ -254,6 +256,7 @@ impl Encoder<RawPacket> for PacketCodec {
 - `DisconnectPeer` 后不触发自动重连
 - PeerListSync 触发的连接遵循字典序去重规则
 - **TCP Keep-alive 在 Windows 和 macOS 上均不报错**（Windows 跳过 retries 设置）
+- **TCP Keep-alive 三个参数均可通过 `NetworkConfig` 配置**（`keepalive_time_secs`、`keepalive_interval_secs`、`keepalive_retries`）
 - **TCP_NODELAY 可通过 `NetworkConfig::tcp_nodelay` 配置化启用**（默认禁用，即 Nagle 启用）
 
 ## 实现映射（关键函数/方法）

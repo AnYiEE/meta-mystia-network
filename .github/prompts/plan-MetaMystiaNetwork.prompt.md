@@ -208,7 +208,7 @@ graph TD
 
 **平台差异注意事项：**
 
-- **TCP Keep-alive retries**：`TCP_KEEPCNT`（重试次数）在 Windows 上不可直接设置，仅 macOS/Linux 支持。代码应在 Windows 上跳过此设置而非报错。
+- **TCP Keep-alive（可配置）**：`keepalive_time_secs`、`keepalive_interval_secs`、`keepalive_retries` 均由 `NetworkConfig` 字段控制，默认值 60/10/3。其中 `TCP_KEEPCNT`（重试次数）在 Windows 上不可直接设置，仅 macOS/Linux 支持。代码在 Windows 上跳过此设置而非报错。
 - **mDNS**：macOS 原生支持 Bonjour，Windows 依赖 `mdns-sd` crate 的多播 UDP 实现，两者行为一致但需分别测试。
 - **DLL 路径**：C# P/Invoke 的 `DllImport` 中库名不带扩展名（如 `"meta_mystia_network"`），运行时自动匹配平台扩展名。
 
@@ -250,15 +250,15 @@ graph TD
 
 ### FFI 安全
 
-| 决策                    | 内容                                            | 理由                                     |
-| ----------------------- | ----------------------------------------------- | ---------------------------------------- |
-| `u8` 代替 `bool`        | FFI 函数/回调/`#[repr(C)]` 结构体全用 `u8`      | Rust 1B ≠ C# 4B，IL2CPP MarshalAs 不稳定 |
-| `catch_unwind`          | 每个 extern "C" 函数包裹                        | panic 跨 FFI 是 UB                       |
-| 字符串单值替换          | `LAST_RETURNED_STRING` 下次调用时释放上次       | C# `PtrToStringAnsi` 同步拷贝天然安全    |
-| 回调禁重入              | C# 回调内不得调 FFI                             | 防死锁/逻辑混乱                          |
-| 错误码 + GetLastError   | FFI 统一返回 `i32`                              | C# 可检查                                |
-| `NetworkConfigFFI` 映射 | 提供与 Rust `NetworkConfig` 完全对应的 C 结构体 | 保证二进制兼容且可由 C# 端构建           |
-| Config 验证             | `InitializeNetworkWithConfig` 调 `validate()`   | 防无效参数                               |
+| 决策                    | 内容                                                                   | 理由                                     |
+| ----------------------- | ---------------------------------------------------------------------- | ---------------------------------------- |
+| `u8` 代替 `bool`        | FFI 函数/回调/`#[repr(C)]` 结构体全用 `u8`                             | Rust 1B ≠ C# 4B，IL2CPP MarshalAs 不稳定 |
+| `catch_unwind`          | 每个 extern "C" 函数包裹                                               | panic 跨 FFI 是 UB                       |
+| 字符串单值替换          | `LAST_RETURNED_STRING` 下次调用时释放上次                              | C# `PtrToStringAnsi` 同步拷贝天然安全    |
+| 回调禁重入              | C# 回调内不得调 FFI                                                    | 防死锁/逻辑混乱                          |
+| 错误码 + GetLastError   | FFI 统一返回 `i32`                                                     | C# 可检查                                |
+| `NetworkConfigFFI` 映射 | 提供与 Rust `NetworkConfig` 完全对应的 C 结构体（含 keepalive 三字段） | 保证二进制兼容且可由 C# 端构建           |
+| Config 验证             | `InitializeNetworkWithConfig` 调 `validate()`                          | 防无效参数                               |
 
 ### 架构
 
