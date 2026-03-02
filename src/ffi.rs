@@ -106,7 +106,8 @@ where
 /// offset 65  auto_election_enabled        u8   (1 B)
 /// offset 66  mdns_port                    u16  (2 B)
 /// offset 68  manual_override_recovery     u8   (1 B)
-/// offset 69  [3 B explicit padding]
+/// offset 69  tcp_nodelay                  u8   (1 B)
+/// offset 70  [2 B explicit padding]
 /// offset 72  handshake_timeout_ms         u64  (8 B)
 /// sizeof = 80
 /// ```
@@ -142,8 +143,11 @@ pub struct NetworkConfigFFI {
     // manual override recovery strategy (0 = Hold, 1 = AutoElect)
     pub manual_override_recovery: u8,
 
+    // TCP_NODELAY toggle (0 = Nagle enabled, 1 = Nagle disabled)
+    pub tcp_nodelay: u8,
+
     // explicit padding to maintain alignment
-    pub(crate) _padding: [u8; 3],
+    pub(crate) _padding: [u8; 2],
 
     // handshake timeout
     pub handshake_timeout_ms: u64,
@@ -167,6 +171,7 @@ impl From<&NetworkConfigFFI> for NetworkConfig {
             centralized_auto_forward: ffi.centralized_auto_forward != 0,
             auto_election_enabled: ffi.auto_election_enabled != 0,
             manual_override_recovery: ManualOverrideRecovery::from_u8(ffi.manual_override_recovery),
+            tcp_nodelay: ffi.tcp_nodelay != 0,
         }
     }
 }

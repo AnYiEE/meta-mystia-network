@@ -90,6 +90,12 @@ pub struct NetworkConfig {
     /// behavior when a manually-assigned leader goes offline.
     /// only relevant when `manual_override` is active.
     pub manual_override_recovery: ManualOverrideRecovery,
+
+    // --- TCP tuning ------------------------------------------------------
+    /// if `true`, disable Nagle's algorithm (`TCP_NODELAY`) on every
+    /// TCP connection. This reduces latency for small messages at the
+    /// cost of slightly higher bandwidth usage. Default: `false`.
+    pub tcp_nodelay: bool,
 }
 
 impl Default for NetworkConfig {
@@ -110,6 +116,7 @@ impl Default for NetworkConfig {
             centralized_auto_forward: true,
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
+            tcp_nodelay: false,
         }
     }
 }
@@ -222,5 +229,11 @@ mod tests {
     fn test_manual_override_recovery_default_in_config() {
         let cfg = NetworkConfig::default();
         assert_eq!(cfg.manual_override_recovery, ManualOverrideRecovery::Hold);
+    }
+
+    #[test]
+    fn test_tcp_nodelay_default_in_config() {
+        let cfg = NetworkConfig::default();
+        assert!(!cfg.tcp_nodelay, "tcp_nodelay should default to false (Nagle enabled)");
     }
 }

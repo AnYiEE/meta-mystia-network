@@ -131,12 +131,13 @@ pub struct NetworkConfigFFI {
     pub auto_election_enabled: u8,         // offset 65
     pub mdns_port: u16,                    // offset 66
     pub manual_override_recovery: u8,      // offset 68 — 0=Hold, 1=AutoElect
-    pub _padding: [u8; 3],                 // offset 69 — 对齐填充
+    pub tcp_nodelay: u8,                   // offset 69 — 0=Nagle enabled, 1=Nagle disabled
+    pub _padding: [u8; 2],                 // offset 70 — 对齐填充
     pub handshake_timeout_ms: u64,         // offset 72
 }   // sizeof = 80
 ```
 
-C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u64→ulong`，`u32→uint`，`u8→byte`，padding 用 3 个 `private byte`（`_padding1`, `_padding2`, `_padding3`）。
+C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u64→ulong`，`u32→uint`，`u8→byte`，padding 用 2 个 `private byte`（`_padding1`, `_padding2`）。
 
 `InitializeNetworkWithConfig` 先转换为 `NetworkConfig`，再调 `config.validate()` 验证参数。
 
@@ -227,7 +228,7 @@ fn return_string(s: String) -> *const c_char {
 ## Verification
 
 - 所有 FFI 函数有 `catch_unwind`，无 `bool` 跨边界
-- `NetworkConfigFFI` 大小为 80 字节（含 1 处隐式 padding（offset 28）+ 1 处显式 padding（offset 69，`_padding: [u8; 3]`））
+- `NetworkConfigFFI` 大小为 80 字节（含 1 处隐式 padding（offset 28）+ 1 处显式 padding（offset 70，`_padding: [u8; 2]`））
 - Shutdown 顺序：PeerLeave → drain → cancel → discovery → drain_callback → transport → join_callback_thread → destroy Runtime
 - Shutdown 后可再次 Initialize
 - `error_codes` 从 `error.rs` 导入

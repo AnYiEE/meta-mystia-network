@@ -24,8 +24,10 @@
 | `test_flags_compression_bit`                                  | 用户 flags bit 0 被库清除，bit 1-7 透传                                |
 | `test_manual_override_recovery_from_u8`                       | `ManualOverrideRecovery::from_u8` 正确映射 0/1/其他值                  |
 | `test_manual_override_recovery_default_in_config`             | `NetworkConfig::default()` 的 `manual_override_recovery` 为 `Hold`     |
+| `test_tcp_nodelay_default_in_config`                          | `NetworkConfig::default()` 的 `tcp_nodelay` 为 `false`                 |
 | **连接与握手**                                                |                                                                        |
 | `test_two_node_connect`                                       | 2 节点 loopback TCP 连接 + 握手成功                                    |
+| `test_tcp_nodelay_connect_and_exchange`                       | `tcp_nodelay: true` 时两节点可正常连接并收发消息                       |
 | `test_handshake_version_mismatch`                             | 协议版本不匹配时握手拒绝                                               |
 | `test_handshake_session_mismatch`                             | session_id 不匹配时握手拒绝                                            |
 | `test_handshake_duplicate_peer_id`                            | 相同 peer_id 连接时拒绝                                                |
@@ -64,6 +66,8 @@
 | `test_ffi_callbacks`                                          | 回调注册与触发                                                         |
 | `test_ffi_error_codes_not_initialized`                        | 未初始化时调用 FFI 返回正确错误码                                      |
 | `test_ffi_full_lifecycle`                                     | FFI 完整生命周期：initialize→connect→send→shutdown                     |
+| `test_ffi_tcp_nodelay_roundtrip`                              | FFI `tcp_nodelay` 字段 0/1 → `NetworkConfig::tcp_nodelay` bool 转换    |
+| `test_ffi_config_size_unchanged`                              | `NetworkConfigFFI` 结构体大小保持 80 字节                              |
 | `test_concurrent_ffi_calls`                                   | 多线程 FFI 调用安全                                                    |
 | `test_graceful_shutdown`                                      | PeerLeave + 资源清理                                                   |
 | `test_shutdown_reinitialize`                                  | Shutdown 后可再次 Initialize                                           |

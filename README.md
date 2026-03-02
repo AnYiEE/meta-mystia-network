@@ -194,7 +194,8 @@ struct NetworkConfigFFI {
     uint8_t  auto_election_enabled;        // offset 65, 默认 1
     uint16_t mdns_port;                    // offset 66, 默认 15353
     uint8_t  manual_override_recovery;     // offset 68, 默认 0（Hold=0, AutoElect=1）
-    uint8_t  _trailing_padding[3];         // offset 69, 显式填充，保证下一个 uint64_t 8 字节对齐
+    uint8_t  tcp_nodelay;                   // offset 69, 默认 0（0=启用Nagle, 1=禁用Nagle）
+    uint8_t  _trailing_padding[2];         // offset 70, 显式填充，保证下一个 uint64_t 8 字节对齐
 
     uint64_t handshake_timeout_ms;         // offset 72, 默认 5000
 };

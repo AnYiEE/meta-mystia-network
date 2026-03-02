@@ -202,8 +202,9 @@ impl TransportManager {
 
     /// Apply platform-specific TCP keepalive settings to a stream.
     /// Used for both incoming and outgoing connections to detect
-    /// dead peers.
-    fn configure_keepalive(stream: &TcpStream) -> Result<(), NetworkError> {
+    /// dead peers. Optionally disables Nagle's algorithm when
+    /// `tcp_nodelay` is `true`.
+    fn configure_socket(stream: &TcpStream, tcp_nodelay: bool) -> Result<(), NetworkError> {
         use socket2::SockRef;
 
         let sock = SockRef::from(stream);
@@ -216,6 +217,10 @@ impl TransportManager {
 
         sock.set_tcp_keepalive(&keepalive)?;
 
+        if tcp_nodelay {
+            stream.set_nodelay(true)?;
+        }
+
         Ok(())
     }
 
@@ -227,7 +232,7 @@ impl TransportManager {
         stream: TcpStream,
         addr: SocketAddr,
     ) -> Result<(), NetworkError> {
-        Self::configure_keepalive(&stream)?;
+        Self::configure_socket(&stream, self.config.tcp_nodelay)?;
 
         let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
 
@@ -404,7 +409,7 @@ impl TransportManager {
         .map_err(|_| NetworkError::HandshakeTimeout)?
         .map_err(|e| NetworkError::ConnectionFailed(format!("TCP connect failed: {e}")))?;
 
-        Self::configure_keepalive(&stream)?;
+        Self::configure_socket(&stream, self.config.tcp_nodelay)?;
 
         let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
 

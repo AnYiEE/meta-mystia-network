@@ -125,9 +125,10 @@ public struct NetworkConfigFFI
     public ushort mdns_port;
     /// <summary>手动 Leader 掉线恢复策略。0=Hold，1=AutoElect。默认 0</summary>
     public byte  manual_override_recovery;
+    /// <summary>禁用 Nagle 算法（TCP_NODELAY）。0=启用 Nagle，1=禁用。默认 0</summary>
+    public byte  tcp_nodelay;
     private byte _padding1; // 对齐填充，勿修改
     private byte _padding2;
-    private byte _padding3;
     /// <summary>握手超时（ms）。默认 5000</summary>
     public ulong handshake_timeout_ms;
 
@@ -148,6 +149,7 @@ public struct NetworkConfigFFI
         auto_election_enabled = 1,
         mdns_port = 15353,
         manual_override_recovery = 0,
+        tcp_nodelay = 0,
         handshake_timeout_ms = 5000,
     };
 }
@@ -415,19 +417,19 @@ public static class MetaMystiaNetwork
 
 ## 4. 使用约束（必读）
 
-| 约束                        | 说明                                                                                                                                                  |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **CallingConvention.Cdecl** | 每个 `DllImport` 必须指定。Rust `extern "C"` = Cdecl，P/Invoke 默认 StdCall（Windows），不匹配导致栈损坏崩溃。                                        |
-| **字符串指针即用即拷**      | `GetLocalAddr()` 等返回的 `IntPtr` 仅在下一次返回字符串的 FFI 调用前有效。立即用 `PtrToString()` 拷贝。                                               |
-| **回调内禁止调 FFI**        | 回调在 Rust 线程触发（非 Unity 主线程）。回调内不得调用任何 FFI 函数（如 `SendToPeer`），否则死锁。将事件入队 `ConcurrentQueue`，由 `Update()` 消费。 |
-| **回调内同步拷贝数据**      | 回调参数的指针（`peerId`、`data`）在回调返回后被 Rust 释放。必须在回调体内完成 `Marshal.PtrToStringAnsi()` 和 `Marshal.Copy()`。                      |
-| **PeerStatus 值范围** | `PeerStatusCallback` 返回的状态是 0=Connected、1=Disconnected、2=Reconnecting、3=Handshaking（握手中）。请在 C# 枚举中保持一致。 |
-| **保持委托引用** | 传给 `Register*Callback` 的委托必须保存为 **静态字段**，防止 GC 回收导致野指针崩溃。 |
-| **`[AOT.MonoPInvokeCallback]`** | IL2CPP 要求所有从 native 调用的回调方法标记此特性，否则 AOT 编译不生成跳板代码。 |
-| **布尔用 byte** | 所有布尔语义参数/返回值为 `byte`（0/1），不要用 C# `bool`。 |
-| **msg_type ≥ 0x0100** | 用户消息类型必须 ≥ 256。0x0001-0x00FF 为内部协议保留。 |
-| **flags bit 0 保留** | `flags` 的 bit 0 由库管理（LZ4 压缩），用户使用 bit 1-7。 |
-| **不并发调字符串 FFI** | 返回 `IntPtr` 的函数不要在多线程同时调用。 |
+| 约束                            | 说明                                                                                                                                                  |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CallingConvention.Cdecl**     | 每个 `DllImport` 必须指定。Rust `extern "C"` = Cdecl，P/Invoke 默认 StdCall（Windows），不匹配导致栈损坏崩溃。                                        |
+| **字符串指针即用即拷**          | `GetLocalAddr()` 等返回的 `IntPtr` 仅在下一次返回字符串的 FFI 调用前有效。立即用 `PtrToString()` 拷贝。                                               |
+| **回调内禁止调 FFI**            | 回调在 Rust 线程触发（非 Unity 主线程）。回调内不得调用任何 FFI 函数（如 `SendToPeer`），否则死锁。将事件入队 `ConcurrentQueue`，由 `Update()` 消费。 |
+| **回调内同步拷贝数据**          | 回调参数的指针（`peerId`、`data`）在回调返回后被 Rust 释放。必须在回调体内完成 `Marshal.PtrToStringAnsi()` 和 `Marshal.Copy()`。                      |
+| **PeerStatus 值范围**           | `PeerStatusCallback` 返回的状态是 0=Connected、1=Disconnected、2=Reconnecting、3=Handshaking（握手中）。请在 C# 枚举中保持一致。                      |
+| **保持委托引用**                | 传给 `Register*Callback` 的委托必须保存为 **静态字段**，防止 GC 回收导致野指针崩溃。                                                                  |
+| **`[AOT.MonoPInvokeCallback]`** | IL2CPP 要求所有从 native 调用的回调方法标记此特性，否则 AOT 编译不生成跳板代码。                                                                      |
+| **布尔用 byte**                 | 所有布尔语义参数/返回值为 `byte`（0/1），不要用 C# `bool`。                                                                                           |
+| **msg_type ≥ 0x0100**           | 用户消息类型必须 ≥ 256。0x0001-0x00FF 为内部协议保留。                                                                                                |
+| **flags bit 0 保留**            | `flags` 的 bit 0 由库管理（LZ4 压缩），用户使用 bit 1-7。                                                                                             |
+| **不并发调字符串 FFI**          | 返回 `IntPtr` 的函数不要在多线程同时调用。                                                                                                            |
 
 ## 快速映射（常用 FFI 调用与行为提醒）
 

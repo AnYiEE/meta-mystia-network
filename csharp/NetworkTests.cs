@@ -566,7 +566,8 @@ public class NetworkTests
     // 65  auto_election_enabled        u8  → 1
     // 66  mdns_port                    u16 → 2
     // 68  manual_override_recovery     u8  → 1
-    // 69  [3 bytes alignment padding – next field is u64]
+    // 69  tcp_nodelay                  u8  → 1
+    // 70  [2 bytes alignment padding – next field is u64]
     // 72  handshake_timeout_ms         u64 → 8
     // total = 80 bytes
     //
@@ -616,6 +617,30 @@ public class NetworkTests
   public void AlreadyConnectedErrorCodeValue()
   {
     Assert.Equal(-14, NetErrorCode.AlreadyConnected);
+  }
+
+  // --- 24b. tcp_nodelay default value -----------------------------------
+
+  [Fact]
+  public void ConfigDefaultTcpNoDelayIsZero()
+  {
+    var cfg = NetworkConfigFFI.Default();
+    Assert.Equal((byte)0, cfg.tcp_nodelay);
+  }
+
+  // --- 24c. Init with tcp_nodelay = 1 succeeds --------------------------
+
+  [Fact]
+  public void ConfigWithTcpNoDelayEnabled()
+  {
+    EnsureShutdown();
+
+    var cfg = NetworkConfigFFI.Default();
+    cfg.tcp_nodelay = 1;
+    MetaMystiaNetwork.Check(
+        MetaMystiaNetwork.InitializeNetworkWithConfig("nd_peer", "session", ref cfg));
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.ShutdownNetwork());
   }
 
   // --- 25. E2E: two-process multi-node connect and exchange messages ---

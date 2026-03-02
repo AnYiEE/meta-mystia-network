@@ -86,6 +86,8 @@ pub struct NetworkConfig {
     pub auto_election_enabled: bool,
     /// 手动指定 Leader 掉线后的恢复策略，默认 Hold
     pub manual_override_recovery: ManualOverrideRecovery,
+    /// 是否禁用 Nagle 算法（TCP_NODELAY），默认 false
+    pub tcp_nodelay: bool,
     /// 最大同时连接数，防止资源耗尽，默认 64
     pub max_connections: usize,
     /// TCP 握手超时（ms），默认 5000
@@ -109,6 +111,7 @@ impl Default for NetworkConfig {
             centralized_auto_forward: true,
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
+            tcp_nodelay: false,
             max_connections: 64,
             handshake_timeout_ms: 5000,
             mdns_port: 15353,

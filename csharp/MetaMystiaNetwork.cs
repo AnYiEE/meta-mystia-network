@@ -207,7 +207,8 @@ namespace MetaMystiaNetworkBindings
   ///  offset 65  auto_election_enabled        u8   (1 B)
   ///  offset 66  mdns_port                    u16  (2 B)
   ///  offset 68  manual_override_recovery     u8   (1 B)
-  ///  offset 69  [3 B alignment padding]
+  ///  offset 69  tcp_nodelay                  u8   (1 B)
+  ///  offset 70  [2 B alignment padding]
   ///  offset 72  handshake_timeout_ms         u64  (8 B)
   ///  sizeof = 80
   /// </code>
@@ -298,7 +299,14 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     public byte manual_override_recovery;
 
-    // 3 bytes of alignment padding (implicit in LayoutKind.Sequential)
+    /// <summary>
+    /// <c>1</c> = disable Nagle's algorithm (<c>TCP_NODELAY</c>) on every TCP
+    /// connection, reducing latency for small messages at the cost of slightly
+    /// higher bandwidth usage; <c>0</c> = keep Nagle enabled (default). Default: 0.
+    /// </summary>
+    public byte tcp_nodelay;
+
+    // 2 bytes of alignment padding (implicit in LayoutKind.Sequential)
 
     /// <summary>
     /// Timeout (ms) to complete the TCP handshake with a remote peer.
@@ -326,6 +334,7 @@ namespace MetaMystiaNetworkBindings
       auto_election_enabled = 1,
       mdns_port = 15353,
       manual_override_recovery = (byte)ManualOverrideRecovery.Hold,
+      tcp_nodelay = 0,
       handshake_timeout_ms = 5000,
     };
   }

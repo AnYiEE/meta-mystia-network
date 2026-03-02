@@ -175,6 +175,12 @@ impl Encoder<RawPacket> for PacketCodec {
    - `keepalive_time = 60s`，`keepalive_interval = 10s`
    - `keepalive_retries = 3`（**仅 macOS/Linux**；Windows 无 `TCP_KEEPCNT`，跳过此设置而非报错）
 
+2b. **TCP_NODELAY（可选）**：
+
+- 通过 `NetworkConfig::tcp_nodelay`（默认 `false`）控制
+- 启用时在 `configure_socket` 中调用 `stream.set_nodelay(true)`
+- 减少小消息延迟，适用于实时场景（如游戏、语音信令）
+
 3. **连接握手（含超时）**：
    - 新 TCP 连接建立后，启动 `config.handshake_timeout_ms`（5s）计时器
    - 主动方发送 `Handshake { peer_id, listen_port, protocol_version, session_id }`
@@ -248,6 +254,7 @@ impl Encoder<RawPacket> for PacketCodec {
 - `DisconnectPeer` 后不触发自动重连
 - PeerListSync 触发的连接遵循字典序去重规则
 - **TCP Keep-alive 在 Windows 和 macOS 上均不报错**（Windows 跳过 retries 设置）
+- **TCP_NODELAY 可通过 `NetworkConfig::tcp_nodelay` 配置化启用**（默认禁用，即 Nagle 启用）
 
 ## 实现映射（关键函数/方法）
 
