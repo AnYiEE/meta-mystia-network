@@ -212,7 +212,7 @@ impl TransportManager {
             .with_interval(Duration::from_secs(config.keepalive_interval_secs.into()));
 
         #[cfg(not(target_os = "windows"))]
-        let keepalive = keepalive.with_retries(config.keepalive_retries);
+        let keepalive = keepalive.with_retries(config.keepalive_retries.into());
 
         sock.set_tcp_keepalive(&keepalive)?;
 
@@ -236,7 +236,7 @@ impl TransportManager {
         let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
 
         let handshake_result = tokio::time::timeout(
-            Duration::from_millis(self.config.handshake_timeout_ms),
+            Duration::from_millis(self.config.handshake_timeout_ms.into()),
             self.receive_handshake(&mut framed),
         )
         .await;
@@ -401,7 +401,7 @@ impl TransportManager {
             .map_err(|e| NetworkError::InvalidArgument(format!("invalid address: {e}")))?;
 
         let stream = tokio::time::timeout(
-            Duration::from_millis(self.config.handshake_timeout_ms),
+            Duration::from_millis(self.config.handshake_timeout_ms.into()),
             TcpStream::connect(socket_addr),
         )
         .await
@@ -427,7 +427,7 @@ impl TransportManager {
         })?;
 
         let ack_result = tokio::time::timeout(
-            Duration::from_millis(self.config.handshake_timeout_ms),
+            Duration::from_millis(self.config.handshake_timeout_ms.into()),
             self.receive_handshake_ack(&mut framed),
         )
         .await;
@@ -628,7 +628,7 @@ impl TransportManager {
     /// shutdown.
     fn spawn_reconnect(self: &Arc<Self>, peer_id: PeerId, addr: String) {
         let mgr = Arc::clone(self);
-        let initial_ms = self.config.reconnect_initial_ms;
+        let initial_ms = u32::from(self.config.reconnect_initial_ms);
         let max_ms = self.config.reconnect_max_ms;
         let shutdown = self.shutdown_token.clone();
 
@@ -639,7 +639,7 @@ impl TransportManager {
 
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                    _ = tokio::time::sleep(Duration::from_millis(delay_ms.into())) => {}
                 }
 
                 let result = tokio::select! {
@@ -654,7 +654,7 @@ impl TransportManager {
                     }
                     Err(e) => {
                         tracing::warn!(peer = %peer_id, error = %e, "reconnect failed");
-                        delay_ms = (delay_ms * 2).min(max_ms);
+                        delay_ms = delay_ms.saturating_mul(2).min(max_ms);
                     }
                 }
             }

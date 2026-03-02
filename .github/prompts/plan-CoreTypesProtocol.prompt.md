@@ -60,26 +60,50 @@ strip = "symbols"
 /// 协议版本号，握手时交换，不兼容则拒绝连接
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// 字段顺序与 FFI 布局一致，避免两侧交叉引用时产生歧义
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkConfig {
+    // --- u32 fields ---
+    /// 重连最大间隔（ms），默认 30000
+    pub reconnect_max_ms: u32,
     /// 压缩阈值（字节），超过此大小自动压缩，默认 512
     pub compression_threshold: u32,
     /// 最大消息大小（payload），防止内存耗尽，默认 256*1024 (256 KiB)
     pub max_message_size: u32,
+
+    // --- u16 timing fields ---
     /// 心跳间隔（同时控制 Ping/Pong 发送频率和 Raft Heartbeat 发送频率），默认 500ms
-    pub heartbeat_interval_ms: u64,
+    pub heartbeat_interval_ms: u16,
     /// 选举超时范围（最小值），默认 1500ms
-    pub election_timeout_min_ms: u64,
+    pub election_timeout_min_ms: u16,
     /// 选举超时范围（最大值），默认 3000ms
-    pub election_timeout_max_ms: u64,
-    /// 存活超时倍数（连续 N 个周期未收到 Pong 回复则判定离线），默认 3
-    pub heartbeat_timeout_multiplier: u32,
+    pub election_timeout_max_ms: u16,
     /// 重连初始间隔，默认 1000ms
-    pub reconnect_initial_ms: u64,
-    /// 重连最大间隔，默认 30000ms
-    pub reconnect_max_ms: u64,
+    pub reconnect_initial_ms: u16,
+    /// TCP 握手超时（ms），默认 5000
+    pub handshake_timeout_ms: u16,
+
+    // --- u16 capacity/keepalive ---
     /// 发送队列最大长度，默认 128
     pub send_queue_capacity: usize,
+    /// 最大同时连接数，防止资源耗尽，默认 64
+    pub max_connections: usize,
+    /// TCP Keep-alive 空闲时间（秒），空闲多久后发送首个探测包，默认 60
+    pub keepalive_time_secs: u16,
+    /// TCP Keep-alive 探测间隔（秒），默认 10
+    pub keepalive_interval_secs: u16,
+
+    // --- u16 discovery ---
+    /// mDNS 发现端口，默认 15353
+    pub mdns_port: u16,
+
+    // --- u8 / small fields ---
+    /// 存活超时倍数（连续 N 个周期未收到 Pong 回复则判定离线），默认 3
+    pub heartbeat_timeout_multiplier: u8,
+    /// TCP Keep-alive 探测重试次数，默认 3（Windows 上无效，仅 macOS/Linux）
+    pub keepalive_retries: u8,
+
+    // --- feature toggles ---
     /// 中心化模式下 Leader 是否自动转发消息，默认 true
     pub centralized_auto_forward: bool,
     /// 是否默认启用自动选举，默认 true
@@ -88,42 +112,30 @@ pub struct NetworkConfig {
     pub manual_override_recovery: ManualOverrideRecovery,
     /// 是否禁用 Nagle 算法（TCP_NODELAY），默认 false
     pub tcp_nodelay: bool,
-    /// 最大同时连接数，防止资源耗尽，默认 64
-    pub max_connections: usize,
-    /// TCP 握手超时（ms），默认 5000
-    pub handshake_timeout_ms: u64,
-    /// mDNS 发现端口，默认 15353
-    pub mdns_port: u16,
-    /// TCP Keep-alive 空闲时间（秒），空闲多久后发送首个探测包，默认 60
-    pub keepalive_time_secs: u32,
-    /// TCP Keep-alive 探测间隔（秒），默认 10
-    pub keepalive_interval_secs: u32,
-    /// TCP Keep-alive 探测重试次数，默认 3（Windows 上无效，仅 macOS/Linux）
-    pub keepalive_retries: u32,
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
+            reconnect_max_ms: 30000,
             compression_threshold: 512,
             max_message_size: 256 * 1024, // 256 KiB
             heartbeat_interval_ms: 500,
             election_timeout_min_ms: 1500,
             election_timeout_max_ms: 3000,
-            heartbeat_timeout_multiplier: 3,
             reconnect_initial_ms: 1000,
-            reconnect_max_ms: 30000,
+            handshake_timeout_ms: 5000,
             send_queue_capacity: 128,
+            max_connections: 64,
+            keepalive_time_secs: 60,
+            keepalive_interval_secs: 10,
+            mdns_port: 15353,
+            heartbeat_timeout_multiplier: 3,
+            keepalive_retries: 3,
             centralized_auto_forward: true,
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
             tcp_nodelay: false,
-            max_connections: 64,
-            handshake_timeout_ms: 5000,
-            mdns_port: 15353,
-            keepalive_time_secs: 60,
-            keepalive_interval_secs: 10,
-            keepalive_retries: 3,
         }
     }
 }
@@ -131,7 +143,7 @@ impl Default for NetworkConfig {
 impl NetworkConfig {
     /// 验证配置合理性，返回第一个发现的错误。
     /// 约束：heartbeat > 0, election_min > heartbeat, election_min ≤ election_max,
-    /// timeout_multiplier > 0, reconnect_initial > 0 且 ≤ reconnect_max, queue > 0,
+    /// timeout_multiplier > 0, reconnect_initial > 0 且 ≤ reconnect_max（跨类型比较用 u32::from），queue > 0,
     /// keepalive_time_secs > 0, keepalive_interval_secs > 0, keepalive_retries > 0
     pub fn validate(&self) -> Result<(), NetworkError> { /* 逐项检查上述约束 */ }
 }

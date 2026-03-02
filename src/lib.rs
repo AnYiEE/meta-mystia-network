@@ -448,7 +448,7 @@ fn spawn_periodic_tasks(
     config: NetworkConfig,
     shutdown_token: CancellationToken,
 ) {
-    let hb_interval = Duration::from_millis(config.heartbeat_interval_ms);
+    let hb_interval = Duration::from_millis(config.heartbeat_interval_ms.into());
     let max_msg = config.max_message_size;
 
     {
@@ -517,7 +517,7 @@ fn spawn_periodic_tasks(
         tokio::spawn(async move {
             loop {
                 let timeout_ms = rand::rng().random_range(election_min..=election_max);
-                let timeout = Duration::from_millis(timeout_ms);
+                let timeout = Duration::from_millis(timeout_ms.into());
 
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
@@ -921,26 +921,26 @@ mod tests {
         // --- Phase 2: InitializeNetworkWithConfig ---
         let d = NetworkConfig::default();
         let config = NetworkConfigFFI {
+            reconnect_max_ms: d.reconnect_max_ms,
+            compression_threshold: 256, // intentionally non-default
+            max_message_size: d.max_message_size,
             heartbeat_interval_ms: d.heartbeat_interval_ms,
             election_timeout_min_ms: d.election_timeout_min_ms,
             election_timeout_max_ms: d.election_timeout_max_ms,
             reconnect_initial_ms: d.reconnect_initial_ms,
-            reconnect_max_ms: d.reconnect_max_ms,
-            compression_threshold: 256, // intentionally non-default
-            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
+            handshake_timeout_ms: d.handshake_timeout_ms,
             send_queue_capacity: 512, // intentionally non-default
-            max_connections: d.max_connections as u32,
-            max_message_size: d.max_message_size,
+            max_connections: d.max_connections as u16,
+            keepalive_time_secs: d.keepalive_time_secs,
+            keepalive_interval_secs: d.keepalive_interval_secs,
+            mdns_port: d.mdns_port,
+            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
+            keepalive_retries: d.keepalive_retries,
             centralized_auto_forward: 1,
             auto_election_enabled: 1,
-            mdns_port: d.mdns_port,
             manual_override_recovery: 0,
             tcp_nodelay: 0,
             _padding: [0; 2],
-            handshake_timeout_ms: d.handshake_timeout_ms,
-            keepalive_time_secs: d.keepalive_time_secs,
-            keepalive_interval_secs: d.keepalive_interval_secs,
-            keepalive_retries: d.keepalive_retries,
         };
 
         let r =
@@ -4367,26 +4367,26 @@ mod tests {
 
         let d = NetworkConfig::default();
         let ffi = NetworkConfigFFI {
+            reconnect_max_ms: d.reconnect_max_ms,
+            compression_threshold: d.compression_threshold,
+            max_message_size: d.max_message_size,
             heartbeat_interval_ms: d.heartbeat_interval_ms,
             election_timeout_min_ms: d.election_timeout_min_ms,
             election_timeout_max_ms: d.election_timeout_max_ms,
-            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
             reconnect_initial_ms: d.reconnect_initial_ms,
-            reconnect_max_ms: d.reconnect_max_ms,
-            compression_threshold: d.compression_threshold,
-            send_queue_capacity: d.send_queue_capacity as u32,
-            max_connections: d.max_connections as u32,
-            max_message_size: d.max_message_size,
+            handshake_timeout_ms: d.handshake_timeout_ms,
+            send_queue_capacity: d.send_queue_capacity as u16,
+            max_connections: d.max_connections as u16,
+            keepalive_time_secs: d.keepalive_time_secs,
+            keepalive_interval_secs: d.keepalive_interval_secs,
+            mdns_port: d.mdns_port,
+            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
+            keepalive_retries: d.keepalive_retries,
             centralized_auto_forward: 1,
             auto_election_enabled: 1,
-            mdns_port: d.mdns_port,
             manual_override_recovery: 0,
             tcp_nodelay: 1,
             _padding: [0; 2],
-            handshake_timeout_ms: d.handshake_timeout_ms,
-            keepalive_time_secs: d.keepalive_time_secs,
-            keepalive_interval_secs: d.keepalive_interval_secs,
-            keepalive_retries: d.keepalive_retries,
         };
 
         let cfg = NetworkConfig::from(&ffi);
@@ -4404,8 +4404,8 @@ mod tests {
     fn test_ffi_config_size_unchanged() {
         assert_eq!(
             std::mem::size_of::<crate::ffi::NetworkConfigFFI>(),
-            96,
-            "NetworkConfigFFI must remain 96 bytes for ABI compatibility"
+            40,
+            "NetworkConfigFFI must remain 40 bytes for ABI compatibility"
         );
     }
 
@@ -4449,26 +4449,26 @@ mod tests {
 
         let d = NetworkConfig::default();
         let ffi = NetworkConfigFFI {
+            reconnect_max_ms: d.reconnect_max_ms,
+            compression_threshold: d.compression_threshold,
+            max_message_size: d.max_message_size,
             heartbeat_interval_ms: d.heartbeat_interval_ms,
             election_timeout_min_ms: d.election_timeout_min_ms,
             election_timeout_max_ms: d.election_timeout_max_ms,
-            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
             reconnect_initial_ms: d.reconnect_initial_ms,
-            reconnect_max_ms: d.reconnect_max_ms,
-            compression_threshold: d.compression_threshold,
-            send_queue_capacity: d.send_queue_capacity as u32,
-            max_connections: d.max_connections as u32,
-            max_message_size: d.max_message_size,
+            handshake_timeout_ms: d.handshake_timeout_ms,
+            send_queue_capacity: d.send_queue_capacity as u16,
+            max_connections: d.max_connections as u16,
+            keepalive_time_secs: 30,
+            keepalive_interval_secs: 5,
+            mdns_port: d.mdns_port,
+            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
+            keepalive_retries: 5,
             centralized_auto_forward: 1,
             auto_election_enabled: 1,
-            mdns_port: d.mdns_port,
             manual_override_recovery: 0,
             tcp_nodelay: 0,
             _padding: [0; 2],
-            handshake_timeout_ms: d.handshake_timeout_ms,
-            keepalive_time_secs: 30,
-            keepalive_interval_secs: 5,
-            keepalive_retries: 5,
         };
 
         let cfg = NetworkConfig::from(&ffi);

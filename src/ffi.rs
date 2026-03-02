@@ -85,64 +85,62 @@ where
 }
 
 /// C-compatible layout for network configuration. Field order mirrors
-/// the Rust `NetworkConfig` and groups timing, sizing and feature
-/// toggle parameters together.
+/// the Rust `NetworkConfig` and groups fields by descending alignment
+/// (u32 → u16 → u8) to eliminate implicit padding.
 ///
-/// # Layout (96 bytes, 8-byte aligned)
+/// # Layout (40 bytes, 4-byte aligned)
 ///
 /// ```text
-/// offset  0  heartbeat_interval_ms        u64  (8 B)
-/// offset  8  election_timeout_min_ms      u64  (8 B)
-/// offset 16  election_timeout_max_ms      u64  (8 B)
-/// offset 24  heartbeat_timeout_multiplier u32  (4 B)
-/// offset 28  [4 B implicit padding]
-/// offset 32  reconnect_initial_ms         u64  (8 B)
-/// offset 40  reconnect_max_ms             u64  (8 B)
-/// offset 48  compression_threshold        u32  (4 B)
-/// offset 52  send_queue_capacity          u32  (4 B)
-/// offset 56  max_connections              u32  (4 B)
-/// offset 60  max_message_size             u32  (4 B)
-/// offset 64  centralized_auto_forward     u8   (1 B)
-/// offset 65  auto_election_enabled        u8   (1 B)
-/// offset 66  mdns_port                    u16  (2 B)
-/// offset 68  manual_override_recovery     u8   (1 B)
-/// offset 69  tcp_nodelay                  u8   (1 B)
-/// offset 70  [2 B explicit padding]
-/// offset 72  handshake_timeout_ms         u64  (8 B)
-/// offset 80  keepalive_time_secs          u32  (4 B)
-/// offset 84  keepalive_interval_secs      u32  (4 B)
-/// offset 88  keepalive_retries            u32  (4 B)
-/// offset 92  [4 B implicit padding — struct alignment]
-/// sizeof = 96
+/// offset  0  reconnect_max_ms             u32  (4 B)
+/// offset  4  compression_threshold        u32  (4 B)
+/// offset  8  max_message_size             u32  (4 B)
+/// offset 12  heartbeat_interval_ms        u16  (2 B)
+/// offset 14  election_timeout_min_ms      u16  (2 B)
+/// offset 16  election_timeout_max_ms      u16  (2 B)
+/// offset 18  reconnect_initial_ms         u16  (2 B)
+/// offset 20  handshake_timeout_ms         u16  (2 B)
+/// offset 22  send_queue_capacity          u16  (2 B)
+/// offset 24  max_connections              u16  (2 B)
+/// offset 26  keepalive_time_secs          u16  (2 B)
+/// offset 28  keepalive_interval_secs      u16  (2 B)
+/// offset 30  mdns_port                    u16  (2 B)
+/// offset 32  heartbeat_timeout_multiplier u8   (1 B)
+/// offset 33  keepalive_retries            u8   (1 B)
+/// offset 34  centralized_auto_forward     u8   (1 B)
+/// offset 35  auto_election_enabled        u8   (1 B)
+/// offset 36  manual_override_recovery     u8   (1 B)
+/// offset 37  tcp_nodelay                  u8   (1 B)
+/// offset 38  [2 B explicit padding]
+/// sizeof = 40
 /// ```
 #[repr(C)]
 pub struct NetworkConfigFFI {
-    // heartbeat/election timing
-    pub heartbeat_interval_ms: u64,
-    pub election_timeout_min_ms: u64,
-    pub election_timeout_max_ms: u64,
-    pub heartbeat_timeout_multiplier: u32,
-
-    // reconnection/backoff timing
-    pub reconnect_initial_ms: u64,
-    pub reconnect_max_ms: u64,
-
-    // payload and queue sizes
+    // u32 fields that require full 32-bit range
+    pub reconnect_max_ms: u32,
     pub compression_threshold: u32,
-    pub send_queue_capacity: u32,
-
-    // connection limits
-    pub max_connections: u32,
-
-    // maximum message size
     pub max_message_size: u32,
+
+    // u16 timing fields (max ~65 s for ms, ~18 h for secs)
+    pub heartbeat_interval_ms: u16,
+    pub election_timeout_min_ms: u16,
+    pub election_timeout_max_ms: u16,
+    pub reconnect_initial_ms: u16,
+    pub handshake_timeout_ms: u16,
+
+    // u16 capacity / keepalive / discovery
+    pub send_queue_capacity: u16,
+    pub max_connections: u16,
+    pub keepalive_time_secs: u16,
+    pub keepalive_interval_secs: u16,
+    pub mdns_port: u16,
+
+    // u8 multiplier / retries
+    pub heartbeat_timeout_multiplier: u8,
+    pub keepalive_retries: u8,
 
     // feature toggles (use 0/1)
     pub centralized_auto_forward: u8,
     pub auto_election_enabled: u8,
-
-    // mDNS discovery port
-    pub mdns_port: u16,
 
     // manual override recovery strategy (0 = Hold, 1 = AutoElect)
     pub manual_override_recovery: u8,
@@ -150,40 +148,32 @@ pub struct NetworkConfigFFI {
     // TCP_NODELAY toggle (0 = Nagle enabled, 1 = Nagle disabled)
     pub tcp_nodelay: u8,
 
-    // explicit padding to maintain alignment
+    // explicit padding to maintain 4-byte alignment
     pub(crate) _padding: [u8; 2],
-
-    // handshake timeout
-    pub handshake_timeout_ms: u64,
-
-    // TCP keepalive parameters
-    pub keepalive_time_secs: u32,
-    pub keepalive_interval_secs: u32,
-    pub keepalive_retries: u32,
 }
 
 impl From<&NetworkConfigFFI> for NetworkConfig {
     fn from(ffi: &NetworkConfigFFI) -> Self {
         Self {
+            reconnect_max_ms: ffi.reconnect_max_ms,
+            compression_threshold: ffi.compression_threshold,
+            max_message_size: ffi.max_message_size,
             heartbeat_interval_ms: ffi.heartbeat_interval_ms,
             election_timeout_min_ms: ffi.election_timeout_min_ms,
             election_timeout_max_ms: ffi.election_timeout_max_ms,
-            heartbeat_timeout_multiplier: ffi.heartbeat_timeout_multiplier,
             reconnect_initial_ms: ffi.reconnect_initial_ms,
-            reconnect_max_ms: ffi.reconnect_max_ms,
-            compression_threshold: ffi.compression_threshold,
+            handshake_timeout_ms: ffi.handshake_timeout_ms,
             send_queue_capacity: ffi.send_queue_capacity as usize,
             max_connections: ffi.max_connections as usize,
-            max_message_size: ffi.max_message_size,
-            handshake_timeout_ms: ffi.handshake_timeout_ms,
+            keepalive_time_secs: ffi.keepalive_time_secs,
+            keepalive_interval_secs: ffi.keepalive_interval_secs,
             mdns_port: ffi.mdns_port,
+            heartbeat_timeout_multiplier: ffi.heartbeat_timeout_multiplier,
+            keepalive_retries: ffi.keepalive_retries,
             centralized_auto_forward: ffi.centralized_auto_forward != 0,
             auto_election_enabled: ffi.auto_election_enabled != 0,
             manual_override_recovery: ManualOverrideRecovery::from_u8(ffi.manual_override_recovery),
             tcp_nodelay: ffi.tcp_nodelay != 0,
-            keepalive_time_secs: ffi.keepalive_time_secs,
-            keepalive_interval_secs: ffi.keepalive_interval_secs,
-            keepalive_retries: ffi.keepalive_retries,
         }
     }
 }

@@ -111,37 +111,37 @@ static LAST_RETURNED_STRING: Mutex<Option<CString>> = Mutex::new(None);
 
 #### NetworkConfigFFI
 
-字段按大小降序排列，`#[repr(C)]` 布局（总大小 96 字节）：
+字段按对齐大小降序排列（u32 → u16 → u8，最后显式 padding），`#[repr(C)]` 布局（总大小 40 字节）：
 
 ```rust
 #[repr(C)]
 pub struct NetworkConfigFFI {
-    pub heartbeat_interval_ms: u64,        // offset  0
-    pub election_timeout_min_ms: u64,      // offset  8
-    pub election_timeout_max_ms: u64,      // offset 16
-    pub heartbeat_timeout_multiplier: u32, // offset 24
-    // [4 B implicit padding]              // offset 28
-    pub reconnect_initial_ms: u64,         // offset 32
-    pub reconnect_max_ms: u64,             // offset 40
-    pub compression_threshold: u32,        // offset 48
-    pub send_queue_capacity: u32,          // offset 52
-    pub max_connections: u32,              // offset 56
-    pub max_message_size: u32,             // offset 60
-    pub centralized_auto_forward: u8,      // offset 64
-    pub auto_election_enabled: u8,         // offset 65
-    pub mdns_port: u16,                    // offset 66
-    pub manual_override_recovery: u8,      // offset 68 — 0=Hold, 1=AutoElect
-    pub tcp_nodelay: u8,                   // offset 69 — 0=Nagle enabled, 1=Nagle disabled
-    pub _padding: [u8; 2],                 // offset 70 — 对齐填充
-    pub handshake_timeout_ms: u64,         // offset 72
-    pub keepalive_time_secs: u32,          // offset 80 — 空闲多久发首个探测（秒），默认 60
-    pub keepalive_interval_secs: u32,      // offset 84 — 探测间隔（秒），默认 10
-    pub keepalive_retries: u32,            // offset 88 — 探测重试次数，默认 3（Windows 忽略）
-    // [4 B implicit padding]              // offset 92
-}   // sizeof = 96
+    pub reconnect_max_ms: u32,             // offset  0
+    pub compression_threshold: u32,        // offset  4
+    pub max_message_size: u32,             // offset  8
+
+    pub heartbeat_interval_ms: u16,        // offset 12
+    pub election_timeout_min_ms: u16,      // offset 14
+    pub election_timeout_max_ms: u16,      // offset 16
+    pub reconnect_initial_ms: u16,         // offset 18
+    pub handshake_timeout_ms: u16,         // offset 20
+    pub send_queue_capacity: u16,          // offset 22
+    pub max_connections: u16,              // offset 24
+    pub keepalive_time_secs: u16,          // offset 26 — 空闲多久发首个探测（秒），默认 60
+    pub keepalive_interval_secs: u16,      // offset 28 — 探测间隔（秒），默认 10
+    pub mdns_port: u16,                    // offset 30
+
+    pub heartbeat_timeout_multiplier: u8,  // offset 32
+    pub keepalive_retries: u8,             // offset 33 — 探测重试次数，默认 3（Windows 忽略）
+    pub centralized_auto_forward: u8,      // offset 34
+    pub auto_election_enabled: u8,         // offset 35
+    pub manual_override_recovery: u8,      // offset 36 — 0=Hold, 1=AutoElect
+    pub tcp_nodelay: u8,                   // offset 37 — 0=Nagle enabled, 1=Nagle disabled
+    pub _padding: [u8; 2],                 // offset 38 — 对齐填充
+}   // sizeof = 40
 ```
 
-C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u64→ulong`，`u32→uint`，`u8→byte`，padding 用 2 个 `private byte`（`_padding1`, `_padding2`）。keepalive 三字段对应 C# `uint`，其中 `keepalive_retries` 在 Windows 上被忽略。
+C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u32→uint`，`u16→ushort`，`u8→byte`，padding 用 2 个 `private byte`（`_padding1`, `_padding2`）。keepalive 三字段中 `keepalive_time_secs`/`keepalive_interval_secs` 对应 C# `ushort`，`keepalive_retries` 对应 C# `byte`（Windows 上被忽略）。
 
 `InitializeNetworkWithConfig` 先转换为 `NetworkConfig`，再调 `config.validate()` 验证参数。
 
@@ -232,7 +232,7 @@ fn return_string(s: String) -> *const c_char {
 ## Verification
 
 - 所有 FFI 函数有 `catch_unwind`，无 `bool` 跨边界
-- `NetworkConfigFFI` 大小为 96 字节（含 2 处隐式 padding（offset 28、offset 92）+ 1 处显式 padding（offset 70，`_padding: [u8; 2]`）；keepalive 三字段位于 offset 80/84/88）
+- `NetworkConfigFFI` 大小为 40 字节（零隐式 padding + 1 处显式 padding（offset 38，`_padding: [u8; 2]`），4 字节对齐；keepalive 三字段位于 offset 26/28/33）
 - Shutdown 顺序：PeerLeave → drain → cancel → discovery → drain_callback → transport → join_callback_thread → destroy Runtime
 - Shutdown 后可再次 Initialize
 - `error_codes` 从 `error.rs` 导入

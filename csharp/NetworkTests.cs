@@ -28,6 +28,16 @@ public class NetworkTests
   /// each test always starts from a clean state.
   void EnsureShutdown() => MetaMystiaNetwork.ShutdownNetwork();
 
+  /// Extended cleanup for E2E tests that start helper processes.
+  /// Drains the shared event queue and adds a brief cooldown to let the
+  /// OS reclaim sockets / mDNS ports from the previous test run.
+  void EnsureCleanSlate()
+  {
+    EnsureShutdown();
+    while (_queue.TryDequeue(out _)) { }
+    Thread.Sleep(500);
+  }
+
   // --- 1. lifecycle ----------------------------------------------------
 
   [Fact]
@@ -551,34 +561,32 @@ public class NetworkTests
   public void NetworkConfigFFISizeMatchesRustLayout()
   {
     // Rust layout (bytes):
-    //  0  heartbeat_interval_ms        u64 → 8
-    //  8  election_timeout_min_ms      u64 → 8
-    // 16  election_timeout_max_ms      u64 → 8
-    // 24  heartbeat_timeout_multiplier u32 → 4
-    // 28  [4 bytes alignment padding – next field is u64]
-    // 32  reconnect_initial_ms         u64 → 8
-    // 40  reconnect_max_ms             u64 → 8
-    // 48  compression_threshold        u32 → 4
-    // 52  send_queue_capacity          u32 → 4
-    // 56  max_connections              u32 → 4
-    // 60  max_message_size             u32 → 4
-    // 64  centralized_auto_forward     u8  → 1
-    // 65  auto_election_enabled        u8  → 1
-    // 66  mdns_port                    u16 → 2
-    // 68  manual_override_recovery     u8  → 1
-    // 69  tcp_nodelay                  u8  → 1
-    // 70  [2 bytes alignment padding – next field is u64]
-    // 72  handshake_timeout_ms         u64 → 8
-    // 80  keepalive_time_secs          u32 → 4
-    // 84  keepalive_interval_secs      u32 → 4
-    // 88  keepalive_retries            u32 → 4
-    // 92  [4 bytes implicit padding – struct alignment]
-    // total = 96 bytes
+    //  0  reconnect_max_ms             u32 → 4
+    //  4  compression_threshold        u32 → 4
+    //  8  max_message_size             u32 → 4
+    // 12  heartbeat_interval_ms        u16 → 2
+    // 14  election_timeout_min_ms      u16 → 2
+    // 16  election_timeout_max_ms      u16 → 2
+    // 18  reconnect_initial_ms         u16 → 2
+    // 20  handshake_timeout_ms         u16 → 2
+    // 22  send_queue_capacity          u16 → 2
+    // 24  max_connections              u16 → 2
+    // 26  keepalive_time_secs          u16 → 2
+    // 28  keepalive_interval_secs      u16 → 2
+    // 30  mdns_port                    u16 → 2
+    // 32  heartbeat_timeout_multiplier u8  → 1
+    // 33  keepalive_retries            u8  → 1
+    // 34  centralized_auto_forward     u8  → 1
+    // 35  auto_election_enabled        u8  → 1
+    // 36  manual_override_recovery     u8  → 1
+    // 37  tcp_nodelay                  u8  → 1
+    // 38  [2 bytes explicit padding]
+    // total = 40 bytes
     //
-    // C# LayoutKind.Sequential obeys the same rules and also produces 96 bytes.
+    // C# LayoutKind.Sequential obeys the same rules and also produces 40 bytes.
     // If this test fails, a field type or order was changed in a way that breaks
     // the FFI ABI with the Rust side.
-    Assert.Equal(96, Marshal.SizeOf<NetworkConfigFFI>());
+    Assert.Equal(40, Marshal.SizeOf<NetworkConfigFFI>());
   }
 
   // --- 21. ManualOverrideRecovery enum values ----------------------------
@@ -789,22 +797,25 @@ public class NetworkTests
   [Fact]
   public void E2E_ThreeNodeMeshConnectivity()
   {
-    EnsureShutdown();
+    EnsureCleanSlate();
 
     string helperProject = LocateHelperProject();
 
+    // Start helpers sequentially to avoid MSBuild lock contention.
     using var helper1 = StartHelper(helperProject, "helper_1", "e2e_mesh_session");
-    using var helper2 = StartHelper(helperProject, "helper_2", "e2e_mesh_session");
     var stdout1 = new ConcurrentQueue<string>();
-    var stdout2 = new ConcurrentQueue<string>();
     StartStdoutReader(helper1, stdout1);
+    string addr1 = WaitForStdoutLine(stdout1, "LISTEN:", 60_000)
+        .Replace("0.0.0.0", "127.0.0.1");
+
+    using var helper2 = StartHelper(helperProject, "helper_2", "e2e_mesh_session");
+    var stdout2 = new ConcurrentQueue<string>();
     StartStdoutReader(helper2, stdout2);
+    string addr2 = WaitForStdoutLine(stdout2, "LISTEN:", 60_000)
+        .Replace("0.0.0.0", "127.0.0.1");
 
     try
     {
-      string addr1 = WaitForStdoutLine(stdout1, "LISTEN:", 60_000).Replace("0.0.0.0", "127.0.0.1");
-      string addr2 = WaitForStdoutLine(stdout2, "LISTEN:", 60_000).Replace("0.0.0.0", "127.0.0.1");
-
       // Initialize our test node
       MetaMystiaNetwork.Check(
           MetaMystiaNetwork.InitializeNetwork("mesh_test", "e2e_mesh_session"));
@@ -822,12 +833,17 @@ public class NetworkTests
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterPeerStatusCallback(_onPeerStatus));
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterConnectionResultCallback(_onConn));
 
+      Assert.False(helper1.HasExited, "helper1 exited before connection");
+      Assert.False(helper2.HasExited, "helper2 exited before connection");
+
       // Connect test node to both helpers
       MetaMystiaNetwork.ConnectToPeer(addr1);
       MetaMystiaNetwork.ConnectToPeer(addr2);
 
-      WaitForCondition(() => MetaMystiaNetwork.GetPeerCount() >= 2, 15_000,
-          "test node did not connect to both helpers");
+      WaitForCondition(() => MetaMystiaNetwork.GetPeerCount() >= 2, 30_000,
+          $"test node did not connect to both helpers within 30 s "
+          + $"(peer_count={MetaMystiaNetwork.GetPeerCount()}, "
+          + $"h1_alive={!helper1.HasExited}, h2_alive={!helper2.HasExited})");
 
       // Verify we get greeting messages from both helpers
       WaitForCondition(() =>
@@ -1058,21 +1074,25 @@ public class NetworkTests
   [Fact]
   public void E2E_TriangleTopology()
   {
-    EnsureShutdown();
+    EnsureCleanSlate();
 
     string helperProject = LocateHelperProject();
+
+    // Start helpers sequentially to avoid MSBuild lock contention.
     using var helper1 = StartHelper(helperProject, "tri_1", "e2e_tri_session");
-    using var helper2 = StartHelper(helperProject, "tri_2", "e2e_tri_session");
     var stdout1 = new ConcurrentQueue<string>();
-    var stdout2 = new ConcurrentQueue<string>();
     StartStdoutReader(helper1, stdout1);
+    string addr1 = WaitForStdoutLine(stdout1, "LISTEN:", 60_000)
+        .Replace("0.0.0.0", "127.0.0.1");
+
+    using var helper2 = StartHelper(helperProject, "tri_2", "e2e_tri_session");
+    var stdout2 = new ConcurrentQueue<string>();
     StartStdoutReader(helper2, stdout2);
+    string addr2 = WaitForStdoutLine(stdout2, "LISTEN:", 60_000)
+        .Replace("0.0.0.0", "127.0.0.1");
 
     try
     {
-      string addr1 = WaitForStdoutLine(stdout1, "LISTEN:", 60_000).Replace("0.0.0.0", "127.0.0.1");
-      string addr2 = WaitForStdoutLine(stdout2, "LISTEN:", 60_000).Replace("0.0.0.0", "127.0.0.1");
-
       MetaMystiaNetwork.Check(
           MetaMystiaNetwork.InitializeNetwork("tri_test", "e2e_tri_session"));
 
@@ -1083,12 +1103,17 @@ public class NetworkTests
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterPeerStatusCallback(_onPeerStatus));
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterConnectionResultCallback(_onConn));
 
+      Assert.False(helper1.HasExited, "helper1 exited before connection");
+      Assert.False(helper2.HasExited, "helper2 exited before connection");
+
       // test → helper1, test → helper2
       MetaMystiaNetwork.ConnectToPeer(addr1);
       MetaMystiaNetwork.ConnectToPeer(addr2);
 
-      WaitForCondition(() => MetaMystiaNetwork.GetPeerCount() >= 2, 15_000,
-          "test node did not connect to both helpers");
+      WaitForCondition(() => MetaMystiaNetwork.GetPeerCount() >= 2, 30_000,
+          $"test node did not connect to both helpers within 30 s "
+          + $"(peer_count={MetaMystiaNetwork.GetPeerCount()}, "
+          + $"h1_alive={!helper1.HasExited}, h2_alive={!helper2.HasExited})");
 
       // Instruct helper1 to connect to helper2 (forming triangle)
       helper1.StandardInput.WriteLine($"CONNECT:{addr2}");
@@ -1170,21 +1195,27 @@ public class NetworkTests
   [Fact]
   public void E2E_PeerListVerification()
   {
-    EnsureShutdown();
+    EnsureCleanSlate();
 
     string helperProject = LocateHelperProject();
+
+    // Start helpers sequentially so the first `dotnet run` finishes
+    // compiling PeerHelper before the second one tries — avoids
+    // MSBuild file-lock contention that can delay startup on Windows.
     using var helper1 = StartHelper(helperProject, "pv_h1", "e2e_pv_session");
-    using var helper2 = StartHelper(helperProject, "pv_h2", "e2e_pv_session");
     var stdout1 = new ConcurrentQueue<string>();
-    var stdout2 = new ConcurrentQueue<string>();
     StartStdoutReader(helper1, stdout1);
+    string addr1 = WaitForStdoutLine(stdout1, "LISTEN:", 60_000)
+        .Replace("0.0.0.0", "127.0.0.1");
+
+    using var helper2 = StartHelper(helperProject, "pv_h2", "e2e_pv_session");
+    var stdout2 = new ConcurrentQueue<string>();
     StartStdoutReader(helper2, stdout2);
+    string addr2 = WaitForStdoutLine(stdout2, "LISTEN:", 60_000)
+        .Replace("0.0.0.0", "127.0.0.1");
 
     try
     {
-      string addr1 = WaitForStdoutLine(stdout1, "LISTEN:", 60_000).Replace("0.0.0.0", "127.0.0.1");
-      string addr2 = WaitForStdoutLine(stdout2, "LISTEN:", 60_000).Replace("0.0.0.0", "127.0.0.1");
-
       MetaMystiaNetwork.Check(
           MetaMystiaNetwork.InitializeNetwork("pv_test", "e2e_pv_session"));
 
@@ -1195,11 +1226,17 @@ public class NetworkTests
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterPeerStatusCallback(_onPeerStatus));
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterConnectionResultCallback(_onConn));
 
+      // Verify helpers are still alive before connecting.
+      Assert.False(helper1.HasExited, "helper1 exited before connection");
+      Assert.False(helper2.HasExited, "helper2 exited before connection");
+
       MetaMystiaNetwork.ConnectToPeer(addr1);
       MetaMystiaNetwork.ConnectToPeer(addr2);
 
-      WaitForCondition(() => MetaMystiaNetwork.GetPeerCount() >= 2, 15_000,
-          "test node did not connect to both helpers");
+      WaitForCondition(() => MetaMystiaNetwork.GetPeerCount() >= 2, 30_000,
+          $"test node did not connect to both helpers within 30 s "
+          + $"(peer_count={MetaMystiaNetwork.GetPeerCount()}, "
+          + $"h1_alive={!helper1.HasExited}, h2_alive={!helper2.HasExited})");
 
       // GetPeerList should contain both helper peer IDs
       string peerListRaw = MetaMystiaNetwork.PtrToString(MetaMystiaNetwork.GetPeerList());

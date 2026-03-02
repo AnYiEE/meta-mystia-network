@@ -189,64 +189,37 @@ namespace MetaMystiaNetworkBindings
   /// <para>
   /// The field layout is <c>#[repr(C)]</c>-compatible with the Rust struct.
   /// <b>Do not reorder fields or change types</b> without also updating the Rust
-  /// side. The struct occupies exactly 96 bytes:
+  /// side. The struct occupies exactly 40 bytes:
   /// </para>
   /// <code>
-  ///  offset  0  heartbeat_interval_ms        u64  (8 B)
-  ///  offset  8  election_timeout_min_ms      u64  (8 B)
-  ///  offset 16  election_timeout_max_ms      u64  (8 B)
-  ///  offset 24  heartbeat_timeout_multiplier u32  (4 B)
-  ///  offset 28  [4 B alignment padding]
-  ///  offset 32  reconnect_initial_ms         u64  (8 B)
-  ///  offset 40  reconnect_max_ms             u64  (8 B)
-  ///  offset 48  compression_threshold        u32  (4 B)
-  ///  offset 52  send_queue_capacity          u32  (4 B)
-  ///  offset 56  max_connections              u32  (4 B)
-  ///  offset 60  max_message_size             u32  (4 B)
-  ///  offset 64  centralized_auto_forward     u8   (1 B)
-  ///  offset 65  auto_election_enabled        u8   (1 B)
-  ///  offset 66  mdns_port                    u16  (2 B)
-  ///  offset 68  manual_override_recovery     u8   (1 B)
-  ///  offset 69  tcp_nodelay                  u8   (1 B)
-  ///  offset 70  [2 B alignment padding]
-  ///  offset 72  handshake_timeout_ms         u64  (8 B)
-  ///  offset 80  keepalive_time_secs          u32  (4 B)
-  ///  offset 84  keepalive_interval_secs      u32  (4 B)
-  ///  offset 88  keepalive_retries            u32  (4 B)
-  ///  offset 92  [4 B implicit padding — struct alignment]
-  ///  sizeof = 96
+  ///  offset  0  reconnect_max_ms             u32  (4 B)
+  ///  offset  4  compression_threshold        u32  (4 B)
+  ///  offset  8  max_message_size             u32  (4 B)
+  ///  offset 12  heartbeat_interval_ms        u16  (2 B)
+  ///  offset 14  election_timeout_min_ms      u16  (2 B)
+  ///  offset 16  election_timeout_max_ms      u16  (2 B)
+  ///  offset 18  reconnect_initial_ms         u16  (2 B)
+  ///  offset 20  handshake_timeout_ms         u16  (2 B)
+  ///  offset 22  send_queue_capacity          u16  (2 B)
+  ///  offset 24  max_connections              u16  (2 B)
+  ///  offset 26  keepalive_time_secs          u16  (2 B)
+  ///  offset 28  keepalive_interval_secs      u16  (2 B)
+  ///  offset 30  mdns_port                    u16  (2 B)
+  ///  offset 32  heartbeat_timeout_multiplier u8   (1 B)
+  ///  offset 33  keepalive_retries            u8   (1 B)
+  ///  offset 34  centralized_auto_forward     u8   (1 B)
+  ///  offset 35  auto_election_enabled        u8   (1 B)
+  ///  offset 36  manual_override_recovery     u8   (1 B)
+  ///  offset 37  tcp_nodelay                  u8   (1 B)
+  ///  offset 38  [2 B explicit padding]
+  ///  sizeof = 40
   /// </code>
   /// </remarks>
   [StructLayout(LayoutKind.Sequential)]
   public struct NetworkConfigFFI
   {
-    /// <summary>Interval between heartbeat / Ping broadcasts (ms). Default: 500.</summary>
-    public ulong heartbeat_interval_ms;
-
-    /// <summary>
-    /// Minimum randomized election timeout (ms).
-    /// Must be greater than <see cref="heartbeat_interval_ms"/>. Default: 1500.
-    /// </summary>
-    public ulong election_timeout_min_ms;
-
-    /// <summary>
-    /// Maximum randomized election timeout (ms).
-    /// Must be ≥ <see cref="election_timeout_min_ms"/>. Default: 3000.
-    /// </summary>
-    public ulong election_timeout_max_ms;
-
-    /// <summary>
-    /// Number of missed heartbeat cycles before a peer is declared offline.
-    /// <b>Must be <c>uint</c> (32-bit) to match the Rust <c>u32</c>.</b>
-    /// Default: 3.
-    /// </summary>
-    public uint heartbeat_timeout_multiplier;
-
-    /// <summary>Initial exponential back-off delay for reconnection attempts (ms). Default: 1000.</summary>
-    public ulong reconnect_initial_ms;
-
     /// <summary>Maximum back-off delay for reconnection attempts (ms). Default: 30 000.</summary>
-    public ulong reconnect_max_ms;
+    public uint reconnect_max_ms;
 
     /// <summary>
     /// LZ4 compression threshold (bytes). Payloads larger than this value are
@@ -255,24 +228,80 @@ namespace MetaMystiaNetworkBindings
     public uint compression_threshold;
 
     /// <summary>
+    /// Maximum allowed message size in bytes. Must be > 0.
+    /// Default: 262 144 (256 KiB).
+    /// </summary>
+    public uint max_message_size;
+
+    /// <summary>Interval between heartbeat / Ping broadcasts (ms). Default: 500.</summary>
+    public ushort heartbeat_interval_ms;
+
+    /// <summary>
+    /// Minimum randomized election timeout (ms).
+    /// Must be greater than <see cref="heartbeat_interval_ms"/>. Default: 1500.
+    /// </summary>
+    public ushort election_timeout_min_ms;
+
+    /// <summary>
+    /// Maximum randomized election timeout (ms).
+    /// Must be ≥ <see cref="election_timeout_min_ms"/>. Default: 3000.
+    /// </summary>
+    public ushort election_timeout_max_ms;
+
+    /// <summary>Initial exponential back-off delay for reconnection attempts (ms). Default: 1000.</summary>
+    public ushort reconnect_initial_ms;
+
+    /// <summary>
+    /// Timeout (ms) to complete the TCP handshake with a remote peer.
+    /// Must be > 0. Default: 5000.
+    /// </summary>
+    public ushort handshake_timeout_ms;
+
+    /// <summary>
     /// Capacity of each peer's outbound send queue (packets). Must be > 0.
     /// Exceeding the capacity returns <see cref="NetErrorCode.SendQueueFull"/>.
     /// Default: 128.
     /// </summary>
-    public uint send_queue_capacity;
+    public ushort send_queue_capacity;
 
     /// <summary>
     /// Maximum number of simultaneous TCP connections. Must be > 0.
     /// Exceeding this limit returns <see cref="NetErrorCode.MaxConnectionsReached"/>.
     /// Default: 64.
     /// </summary>
-    public uint max_connections;
+    public ushort max_connections;
 
     /// <summary>
-    /// Maximum allowed message size in bytes. Must be > 0.
-    /// Default: 262 144 (256 KiB).
+    /// Idle time (seconds) before the first TCP keepalive probe is sent.
+    /// Must be > 0. Default: 60.
     /// </summary>
-    public uint max_message_size;
+    public ushort keepalive_time_secs;
+
+    /// <summary>
+    /// Interval (seconds) between successive TCP keepalive probes once
+    /// the idle threshold is reached. Must be > 0. Default: 10.
+    /// </summary>
+    public ushort keepalive_interval_secs;
+
+    /// <summary>
+    /// UDP port for mDNS peer discovery. Both publisher and browser must use
+    /// the same port. Standard mDNS uses 5353 but the Windows DNS Client
+    /// occupies that port; <c>15353</c> avoids the conflict. Default: 15353.
+    /// </summary>
+    public ushort mdns_port;
+
+    /// <summary>
+    /// Number of missed heartbeat cycles before a peer is declared offline.
+    /// Default: 3.
+    /// </summary>
+    public byte heartbeat_timeout_multiplier;
+
+    /// <summary>
+    /// Number of unacknowledged keepalive probes before the connection is
+    /// considered dead. <b>Ignored on Windows</b> which does not expose
+    /// <c>TCP_KEEPCNT</c>. Must be > 0. Default: 3.
+    /// </summary>
+    public byte keepalive_retries;
 
     /// <summary>
     /// Centralized-mode Leader behavior: <c>1</c> = automatically re-broadcast
@@ -289,13 +318,6 @@ namespace MetaMystiaNetworkBindings
     public byte auto_election_enabled;
 
     /// <summary>
-    /// UDP port for mDNS peer discovery. Both publisher and browser must use
-    /// the same port. Standard mDNS uses 5353 but the Windows DNS Client
-    /// occupies that port; <c>15353</c> avoids the conflict. Default: 15353.
-    /// </summary>
-    public ushort mdns_port;
-
-    /// <summary>
     /// Behaviour when a manually-assigned leader goes offline.
     /// Only relevant when <c>manual_override</c> is active.
     /// <c>0</c> = <see cref="ManualOverrideRecovery.Hold"/> (default),
@@ -310,32 +332,7 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     public byte tcp_nodelay;
 
-    // 2 bytes of alignment padding (implicit in LayoutKind.Sequential)
-
-    /// <summary>
-    /// Timeout (ms) to complete the TCP handshake with a remote peer.
-    /// Must be > 0. Default: 5000.
-    /// </summary>
-    public ulong handshake_timeout_ms;
-
-    /// <summary>
-    /// Idle time (seconds) before the first TCP keepalive probe is sent.
-    /// Must be > 0. Default: 60.
-    /// </summary>
-    public uint keepalive_time_secs;
-
-    /// <summary>
-    /// Interval (seconds) between successive TCP keepalive probes once
-    /// the idle threshold is reached. Must be > 0. Default: 10.
-    /// </summary>
-    public uint keepalive_interval_secs;
-
-    /// <summary>
-    /// Number of unacknowledged keepalive probes before the connection is
-    /// considered dead. <b>Ignored on Windows</b> which does not expose
-    /// <c>TCP_KEEPCNT</c>. Must be > 0. Default: 3.
-    /// </summary>
-    public uint keepalive_retries;
+    // 2 bytes of explicit trailing padding (maintains 4-byte alignment)
 
     /// <summary>
     /// Returns a <see cref="NetworkConfigFFI"/> pre-filled with the same defaults
@@ -343,25 +340,25 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     public static NetworkConfigFFI Default() => new()
     {
+      reconnect_max_ms = 30_000,
+      compression_threshold = 512,
+      max_message_size = 256 * 1024,
       heartbeat_interval_ms = 500,
       election_timeout_min_ms = 1500,
       election_timeout_max_ms = 3000,
-      heartbeat_timeout_multiplier = 3,
       reconnect_initial_ms = 1000,
-      reconnect_max_ms = 30_000,
-      compression_threshold = 512,
+      handshake_timeout_ms = 5000,
       send_queue_capacity = 128,
       max_connections = 64,
-      max_message_size = 256 * 1024,
-      centralized_auto_forward = 1,
-      auto_election_enabled = 1,
-      mdns_port = 15353,
-      manual_override_recovery = (byte)ManualOverrideRecovery.Hold,
-      tcp_nodelay = 0,
-      handshake_timeout_ms = 5000,
       keepalive_time_secs = 60,
       keepalive_interval_secs = 10,
+      mdns_port = 15353,
+      heartbeat_timeout_multiplier = 3,
       keepalive_retries = 3,
+      centralized_auto_forward = 1,
+      auto_election_enabled = 1,
+      manual_override_recovery = (byte)ManualOverrideRecovery.Hold,
+      tcp_nodelay = 0,
     };
   }
 

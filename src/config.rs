@@ -36,49 +36,57 @@ impl ManualOverrideRecovery {
 /// User‑tunable parameters that control timing, buffering,
 /// and behavior of the peer‑to‑peer network.
 ///
-/// Fields are grouped by purpose to make it easier to
-/// configure and validate.
+/// Field order matches the FFI layout in `NetworkConfigFFI`
+/// (descending alignment: u32 → u16 → u8/bool) to avoid
+/// ambiguity when cross-referencing the two structs.
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkConfig {
-    // --- compression -----------------------------------------------------
+    // --- u32 fields ------------------------------------------------------
+    /// maximum backoff delay (ms) for reconnection attempts
+    pub reconnect_max_ms: u32,
     /// minimum payload size (bytes) before attempting LZ4
     /// compression. smaller packets are sent uncompressed.
     pub compression_threshold: u32,
-
-    // --- heartbeats & election -------------------------------------------
-    /// interval (ms) between automatic heartbeat broadcasts
-    pub heartbeat_interval_ms: u64,
-    /// lower bound for randomized election timeout (ms)
-    pub election_timeout_min_ms: u64,
-    /// upper bound for randomized election timeout (ms)
-    pub election_timeout_max_ms: u64,
-    /// multiplier applied to heartbeat interval when
-    /// calculating member timeout detection
-    pub heartbeat_timeout_multiplier: u32,
-
-    // --- reconnection/backoff --------------------------------------------
-    /// initial delay (ms) before attempting to reconnect
-    pub reconnect_initial_ms: u64,
-    /// maximum backoff delay (ms) for reconnection attempts
-    pub reconnect_max_ms: u64,
-
-    // --- buffers & capacities --------------------------------------------
-    /// capacity of each peer's outgoing send queue
-    pub send_queue_capacity: usize,
-    /// maximum number of simultaneous TCP connections
-    pub max_connections: usize,
     /// maximum size (bytes) of a single message payload.
     /// both user and internal messages are subject to this limit.
     pub max_message_size: u32,
 
-    // --- timeouts --------------------------------------------------------
+    // --- u16 timing fields -----------------------------------------------
+    /// interval (ms) between automatic heartbeat broadcasts
+    pub heartbeat_interval_ms: u16,
+    /// lower bound for randomized election timeout (ms)
+    pub election_timeout_min_ms: u16,
+    /// upper bound for randomized election timeout (ms)
+    pub election_timeout_max_ms: u16,
+    /// initial delay (ms) before attempting to reconnect
+    pub reconnect_initial_ms: u16,
     /// timeout (ms) to complete the TCP handshake exchange
-    pub handshake_timeout_ms: u64,
+    pub handshake_timeout_ms: u16,
 
-    // --- discovery -------------------------------------------------------
+    // --- u16 capacity/keepalive fields -----------------------------------
+    /// capacity of each peer's outgoing send queue
+    pub send_queue_capacity: usize,
+    /// maximum number of simultaneous TCP connections
+    pub max_connections: usize,
+    /// idle time (seconds) before the first keepalive probe is sent.
+    pub keepalive_time_secs: u16,
+    /// interval (seconds) between successive keepalive probes once
+    /// the idle threshold is reached.
+    pub keepalive_interval_secs: u16,
+
+    // --- u16 discovery ---------------------------------------------------
     /// UDP port for mDNS service discovery. Both publisher and
     /// browser must use the same port to communicate.
     pub mdns_port: u16,
+
+    // --- u8 / small fields -----------------------------------------------
+    /// multiplier applied to heartbeat interval when
+    /// calculating member timeout detection
+    pub heartbeat_timeout_multiplier: u8,
+    /// number of unacknowledged keepalive probes before the
+    /// connection is considered dead. **Ignored on Windows** which
+    /// does not expose `TCP_KEEPCNT`.
+    pub keepalive_retries: u8,
 
     // --- feature toggles -------------------------------------------------
     /// if `true`, leader will automatically forward incoming
@@ -90,48 +98,34 @@ pub struct NetworkConfig {
     /// behavior when a manually-assigned leader goes offline.
     /// only relevant when `manual_override` is active.
     pub manual_override_recovery: ManualOverrideRecovery,
-
-    // --- TCP tuning ------------------------------------------------------
     /// if `true`, disable Nagle's algorithm (`TCP_NODELAY`) on every
     /// TCP connection. This reduces latency for small messages at the
     /// cost of slightly higher bandwidth usage. Default: `false`.
     pub tcp_nodelay: bool,
-
-    // --- TCP keepalive ---------------------------------------------------
-    /// idle time (seconds) before the first keepalive probe is sent.
-    /// Default: `60`.
-    pub keepalive_time_secs: u32,
-    /// interval (seconds) between successive keepalive probes once
-    /// the idle threshold is reached. Default: `10`.
-    pub keepalive_interval_secs: u32,
-    /// number of unacknowledged keepalive probes before the
-    /// connection is considered dead. **Ignored on Windows** which
-    /// does not expose `TCP_KEEPCNT`. Default: `3`.
-    pub keepalive_retries: u32,
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
+            reconnect_max_ms: 30000,
             compression_threshold: 512,
+            max_message_size: 256 * 1024,
             heartbeat_interval_ms: 500,
             election_timeout_min_ms: 1500,
             election_timeout_max_ms: 3000,
-            heartbeat_timeout_multiplier: 3,
             reconnect_initial_ms: 1000,
-            reconnect_max_ms: 30000,
+            handshake_timeout_ms: 5000,
             send_queue_capacity: 128,
             max_connections: 64,
-            max_message_size: 256 * 1024,
-            handshake_timeout_ms: 5000,
+            keepalive_time_secs: 60,
+            keepalive_interval_secs: 10,
             mdns_port: 15353,
+            heartbeat_timeout_multiplier: 3,
+            keepalive_retries: 3,
             centralized_auto_forward: true,
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
             tcp_nodelay: false,
-            keepalive_time_secs: 60,
-            keepalive_interval_secs: 10,
-            keepalive_retries: 3,
         }
     }
 }
@@ -157,7 +151,7 @@ impl NetworkConfig {
         if self.reconnect_initial_ms == 0 {
             return e("reconnect_initial_ms must be > 0");
         }
-        if self.reconnect_initial_ms > self.reconnect_max_ms {
+        if u32::from(self.reconnect_initial_ms) > self.reconnect_max_ms {
             return e("reconnect_initial_ms must be <= reconnect_max_ms");
         }
         if self.send_queue_capacity == 0 {

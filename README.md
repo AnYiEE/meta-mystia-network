@@ -111,7 +111,7 @@ MetaMystiaNetwork.ShutdownNetwork();
 | 函数                                                  | 描述                                 | 备注                                                                      |
 | ----------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------- |
 | `InitializeNetwork(peerId, sessionId)`                | 初始化网络状态，必须在首次使用前调用 | 重复调用返回 `AlreadyInitialized`；可通过 `IsNetworkInitialized` 检查     |
-| `InitializeNetworkWithConfig(peerId, sessionId, cfg)` | 使用自定义配置初始化                 | `cfg` 不能为空指针；结构体大小须为 96 字节且字段顺序与 Rust 端对齐        |
+| `InitializeNetworkWithConfig(peerId, sessionId, cfg)` | 使用自定义配置初始化                 | `cfg` 不能为空指针；结构体大小须为 40 字节且字段顺序与 Rust 端对齐        |
 | `ShutdownNetwork()`                                   | 关闭并清理所有资源                   | 未初始化时调用返回 `NotInitialized`；关闭后可重新调用 `InitializeNetwork` |
 | `IsNetworkInitialized()`                              | 已初始化返回 `1`，否则返回 `0`       |                                                                           |
 | `GetLastErrorCode()` / `GetLastErrorMessage()`        | 获取最近一次调用失败的错误码和描述   | 消息字符串有效期至下一次字符串返回前                                      |
@@ -171,45 +171,40 @@ MetaMystiaNetwork.ShutdownNetwork();
 
 ## 🧩 配置与默认值
 
-默认采用 `NetworkConfig::default()`，对应 C# 的 `NetworkConfigFFI.Default()`，一般无需修改。`NetworkConfigFFI` 的内存布局必须与 Rust 端完全一致，结构体总大小为 **96 字节**：
+默认采用 `NetworkConfig::default()`，对应 C# 的 `NetworkConfigFFI.Default()`，一般无需修改。`NetworkConfigFFI` 的内存布局必须与 Rust 端完全一致，结构体总大小为 **40 字节**：
 
 ```c
-// 总大小 96 字节（含编译器隐式对齐填充，详见 #[repr(C)] 布局）
+// 总大小 40 字节，4 字节对齐，零隐式填充（详见 #[repr(C)] 布局）
 struct NetworkConfigFFI {
-    uint64_t heartbeat_interval_ms;        // offset  0, 默认 500
-    uint64_t election_timeout_min_ms;      // offset  8, 默认 1500
-    uint64_t election_timeout_max_ms;      // offset 16, 默认 3000
-    uint32_t heartbeat_timeout_multiplier; // offset 24, 默认 3
-    uint8_t  _implicit_padding[4];         // offset 28, 编译器自动插入，保证下一个 uint64_t 8 字节对齐
+    uint32_t reconnect_max_ms;             // offset  0, 默认 30000
+    uint32_t compression_threshold;        // offset  4, 默认 512（字节）
+    uint32_t max_message_size;             // offset  8, 默认 262144（256 KiB）
 
-    uint64_t reconnect_initial_ms;         // offset 32, 默认 1000
-    uint64_t reconnect_max_ms;             // offset 40, 默认 30000
+    uint16_t heartbeat_interval_ms;        // offset 12, 默认 500
+    uint16_t election_timeout_min_ms;      // offset 14, 默认 1500
+    uint16_t election_timeout_max_ms;      // offset 16, 默认 3000
+    uint16_t reconnect_initial_ms;         // offset 18, 默认 1000
+    uint16_t handshake_timeout_ms;         // offset 20, 默认 5000
+    uint16_t send_queue_capacity;          // offset 22, 默认 128
+    uint16_t max_connections;              // offset 24, 默认 64
+    uint16_t keepalive_time_secs;          // offset 26, 默认 60（空闲多久发首个探测包，秒）
+    uint16_t keepalive_interval_secs;      // offset 28, 默认 10（探测间隔，秒）
+    uint16_t mdns_port;                    // offset 30, 默认 15353
 
-    uint32_t compression_threshold;        // offset 48, 默认 512（字节）
-    uint32_t send_queue_capacity;          // offset 52, 默认 128
-    uint32_t max_connections;              // offset 56, 默认 64
-    uint32_t max_message_size;             // offset 60, 默认 262144（256 KiB）
-
-    uint8_t  centralized_auto_forward;     // offset 64, 默认 1
-    uint8_t  auto_election_enabled;        // offset 65, 默认 1
-    uint16_t mdns_port;                    // offset 66, 默认 15353
-    uint8_t  manual_override_recovery;     // offset 68, 默认 0（Hold=0, AutoElect=1）
-    uint8_t  tcp_nodelay;                   // offset 69, 默认 0（0=启用Nagle, 1=禁用Nagle）
-    uint8_t  _trailing_padding[2];         // offset 70, 显式填充，保证下一个 uint64_t 8 字节对齐
-
-    uint64_t handshake_timeout_ms;         // offset 72, 默认 5000
-
-    uint32_t keepalive_time_secs;          // offset 80, 默认 60（空闲多久发首个探测包，秒）
-    uint32_t keepalive_interval_secs;      // offset 84, 默认 10（探测间隔，秒）
-    uint32_t keepalive_retries;            // offset 88, 默认 3（探测重试次数；Windows 忽略此字段）
-    uint8_t  _implicit_padding2[4];        // offset 92, 编译器自动插入，保持 8 字节对齐
+    uint8_t  heartbeat_timeout_multiplier; // offset 32, 默认 3
+    uint8_t  keepalive_retries;            // offset 33, 默认 3（探测重试次数；Windows 忽略此字段）
+    uint8_t  centralized_auto_forward;     // offset 34, 默认 1
+    uint8_t  auto_election_enabled;        // offset 35, 默认 1
+    uint8_t  manual_override_recovery;     // offset 36, 默认 0（Hold=0, AutoElect=1）
+    uint8_t  tcp_nodelay;                  // offset 37, 默认 0（0=启用Nagle, 1=禁用Nagle）
+    uint8_t  _padding[2];                  // offset 38, 显式填充，保持 4 字节对齐
 };
 ```
 
 - `validate()` 会校验字段合理性（非零、范围关系等），校验失败时 `InitializeNetworkWithConfig` 返回 `InvalidArgument`。
 - TCP Keep-alive 的三个参数（`keepalive_time_secs`、`keepalive_interval_secs`、`keepalive_retries`）均可由上层配置；其中 `keepalive_retries` 在 Windows 上被忽略（Windows 无 `TCP_KEEPCNT` 支持）。
 - C# 侧使用 `LayoutKind.Sequential` 且不指定 `Pack` 时，编译器将自动处理隐式对齐填充，无需手动插入。
-- C# 绑定提供 `NetworkConfigFFI.Default()`，单元测试已校验结构体大小为 96 字节。
+- C# 绑定提供 `NetworkConfigFFI.Default()`，单元测试已校验结构体大小为 40 字节。
 
 > ⚠️ 修改 `NetworkConfigFFI` 的字段顺序或类型会破坏跨语言 ABI 兼容性，导致内存损坏。
 

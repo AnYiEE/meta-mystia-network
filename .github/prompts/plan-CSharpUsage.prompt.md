@@ -91,75 +91,81 @@ public struct NetworkEvent
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// 网络配置（与 Rust #[repr(C)] 布局一致）。
+/// 网络配置（与 Rust #[repr(C)] 布局一致，总大小 40 字节）。
 /// 用 <see cref="Default"/> 获取默认值后按需修改，传入 InitializeNetworkWithConfig。
+/// 字段按对齐降序排列：3×uint → 10×ushort → 6×byte + 2B padding。
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct NetworkConfigFFI
 {
-    /// <summary>Ping/Pong 及 Raft Heartbeat 间隔（ms）。默认 500</summary>
-    public ulong heartbeat_interval_ms;
-    /// <summary>选举超时最小值（ms），须 > heartbeat。默认 1500</summary>
-    public ulong election_timeout_min_ms;
-    /// <summary>选举超时最大值（ms），须 ≥ min。默认 3000</summary>
-    public ulong election_timeout_max_ms;
-    /// <summary>存活超时倍数：连续 N 个周期未收到 Pong 判定离线。默认 3</summary>
-    public uint  heartbeat_timeout_multiplier;
-    /// <summary>断线重连初始间隔（ms），指数退避起点。默认 1000</summary>
-    public ulong reconnect_initial_ms;
+    // --- uint (u32) fields ---
     /// <summary>断线重连最大间隔（ms），退避上限。默认 30000</summary>
-    public ulong reconnect_max_ms;
+    public uint  reconnect_max_ms;
     /// <summary>LZ4 压缩阈值（字节），payload 超此大小自动压缩。默认 512</summary>
     public uint  compression_threshold;
-    /// <summary>per-peer 发送队列上限。满时返回 SendQueueFull。默认 128</summary>
-    public uint  send_queue_capacity;
-    /// <summary>最大连接数。默认 64</summary>
-    public uint  max_connections;
     /// <summary>最大消息大小（payload 字节）。默认 262144 (256 KiB)</summary>
     public uint  max_message_size;
+
+    // --- ushort (u16) fields ---
+    /// <summary>Ping/Pong 及 Raft Heartbeat 间隔（ms）。默认 500</summary>
+    public ushort heartbeat_interval_ms;
+    /// <summary>选举超时最小值（ms），须 > heartbeat。默认 1500</summary>
+    public ushort election_timeout_min_ms;
+    /// <summary>选举超时最大值（ms），须 ≥ min。默认 3000</summary>
+    public ushort election_timeout_max_ms;
+    /// <summary>断线重连初始间隔（ms），指数退避起点。默认 1000</summary>
+    public ushort reconnect_initial_ms;
+    /// <summary>握手超时（ms）。默认 5000</summary>
+    public ushort handshake_timeout_ms;
+    /// <summary>per-peer 发送队列上限。满时返回 SendQueueFull。默认 128</summary>
+    public ushort send_queue_capacity;
+    /// <summary>最大连接数。默认 64</summary>
+    public ushort max_connections;
+    /// <summary>TCP Keep-alive 空闲时间（秒），空闲多久后发送首个探测包。默认 60</summary>
+    public ushort keepalive_time_secs;
+    /// <summary>TCP Keep-alive 探测间隔（秒）。默认 10</summary>
+    public ushort keepalive_interval_secs;
+    /// <summary>mDNS 端口。默认 15353</summary>
+    public ushort mdns_port;
+
+    // --- byte (u8) fields ---
+    /// <summary>存活超时倍数：连续 N 个周期未收到 Pong 判定离线。默认 3</summary>
+    public byte  heartbeat_timeout_multiplier;
+    /// <summary>TCP Keep-alive 探测重试次数，Windows 上无效。默认 3</summary>
+    public byte  keepalive_retries;
     /// <summary>中心化模式下 Leader 自动转发。0=需 C# 手动 Forward，1=自动。默认 1</summary>
     public byte  centralized_auto_forward;
     /// <summary>启用自动 Raft 选举。0=仅手动 SetLeader，1=自动。默认 1</summary>
     public byte  auto_election_enabled;
-    /// <summary>mDNS 端口。默认 15353</summary>
-    public ushort mdns_port;
     /// <summary>手动 Leader 掉线恢复策略。0=Hold，1=AutoElect。默认 0</summary>
     public byte  manual_override_recovery;
     /// <summary>禁用 Nagle 算法（TCP_NODELAY）。0=启用 Nagle，1=禁用。默认 0</summary>
     public byte  tcp_nodelay;
     private byte _padding1; // 对齐填充，勿修改
     private byte _padding2;
-    /// <summary>握手超时（ms）。默认 5000</summary>
-    public ulong handshake_timeout_ms;
-    /// <summary>TCP Keep-alive 空闲时间（秒），空闲多久后发送首个探测包。默认 60</summary>
-    public uint  keepalive_time_secs;
-    /// <summary>TCP Keep-alive 探测间隔（秒）。默认 10</summary>
-    public uint  keepalive_interval_secs;
-    /// <summary>TCP Keep-alive 探测重试次数，Windows 上无效。默认 3</summary>
-    public uint  keepalive_retries;
 
     /// <summary>返回所有字段为默认值的配置实例。</summary>
     public static NetworkConfigFFI Default() => new()
     {
+        reconnect_max_ms = 30000,
+        compression_threshold = 512,
+        max_message_size = 262144,
         heartbeat_interval_ms = 500,
         election_timeout_min_ms = 1500,
         election_timeout_max_ms = 3000,
-        heartbeat_timeout_multiplier = 3,
         reconnect_initial_ms = 1000,
-        reconnect_max_ms = 30000,
-        compression_threshold = 512,
+        handshake_timeout_ms = 5000,
         send_queue_capacity = 128,
         max_connections = 64,
-        max_message_size = 262144,
-        centralized_auto_forward = 1,
-        auto_election_enabled = 1,
-        mdns_port = 15353,
-        manual_override_recovery = 0,
-        tcp_nodelay = 0,
-        handshake_timeout_ms = 5000,
         keepalive_time_secs = 60,
         keepalive_interval_secs = 10,
+        mdns_port = 15353,
+        heartbeat_timeout_multiplier = 3,
         keepalive_retries = 3,
+        centralized_auto_forward = 1,
+        auto_election_enabled = 1,
+        manual_override_recovery = 0,
+        tcp_nodelay = 0,
     };
 }
 ```

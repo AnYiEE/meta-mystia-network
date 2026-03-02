@@ -163,9 +163,9 @@ impl MembershipManager {
     /// Return list of peers whose last-seen exceeded the calculated
     /// timeout (heartbeat interval * multiplier). Useful for cleanup.
     pub fn check_timeouts(&self) -> Vec<PeerId> {
-        let timeout_ms =
-            self.config.heartbeat_interval_ms * self.config.heartbeat_timeout_multiplier as u64;
-        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let timeout_ms = u32::from(self.config.heartbeat_interval_ms)
+            * u32::from(self.config.heartbeat_timeout_multiplier);
+        let timeout = std::time::Duration::from_millis(timeout_ms.into());
         let now = Instant::now();
 
         let peers = self.peers.read();
