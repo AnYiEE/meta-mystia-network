@@ -55,7 +55,7 @@ pub enum MembershipEvent {
 3. **存活探测（Ping/Pong）**：
    - **主动发送**：每 `heartbeat_interval_ms`（默认 500ms）向所有 Connected 状态的 peer 发送 `Ping { timestamp_ms }`（由消息循环发起，非 MembershipManager 直接发送）
    - **被动检测**：收到 `Ping` 时回复 `Pong`；收到 `Pong` 时更新 `last_seen` 和 `rtt_ms`
-   - **超时判断**：后台 task 每 `heartbeat_interval_ms` 检查一次，若 `last_seen` 距今超过 `heartbeat_interval * timeout_multiplier`，标记为 Disconnected
+   - **超时判断**：后台 task 每 `heartbeat_interval_ms` 检查一次，若 `last_seen` 距今超过 `heartbeat_interval * timeout_multiplier`，标记为 Disconnected，并通过 `transport.disconnect_peer()` 强制断开该 peer 的连接（防止半开连接残留）
    - Raft `Heartbeat` 仅由 Leader 发送（见 leader.rs），仅用于维持领导权，不影响存活判定
 
 4. **RTT 测量**：

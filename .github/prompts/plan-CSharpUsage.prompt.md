@@ -101,7 +101,7 @@ public struct NetworkConfigFFI
     // --- uint (u32) fields ---
     /// <summary>断线重连最大间隔（ms），退避上限。默认 30000</summary>
     public uint  reconnect_max_ms;
-    /// <summary>LZ4 压缩阈值（字节），payload 超此大小自动压缩。默认 512</summary>
+    /// <summary>LZ4 压缩阈值（字节），payload 超此大小自动压缩。设为 0 时压缩所有非空 payload。默认 512</summary>
     public uint  compression_threshold;
     /// <summary>最大消息大小（payload 字节）。默认 262144 (256 KiB)</summary>
     public uint  max_message_size;
@@ -139,7 +139,7 @@ public struct NetworkConfigFFI
     public byte  auto_election_enabled;
     /// <summary>手动 Leader 掉线恢复策略。0=Hold，1=AutoElect。默认 0</summary>
     public byte  manual_override_recovery;
-    /// <summary>禁用 Nagle 算法（TCP_NODELAY）。0=启用 Nagle，1=禁用。默认 0</summary>
+    /// <summary>禁用 Nagle 算法（TCP_NODELAY）。0=启用 Nagle，1=禁用。默认 1</summary>
     public byte  tcp_nodelay;
     private byte _padding1; // 对齐填充，勿修改
     private byte _padding2;
@@ -165,7 +165,7 @@ public struct NetworkConfigFFI
         centralized_auto_forward = 1,
         auto_election_enabled = 1,
         manual_override_recovery = 0,
-        tcp_nodelay = 0,
+        tcp_nodelay = 1,
     };
 }
 ```
@@ -238,6 +238,10 @@ public static class MetaMystiaNetwork
     /// <summary>检查网络是否已初始化。0=否，1=是。</summary>
     [DllImport(DLL, CallingConvention = CC)]
     public static extern byte IsNetworkInitialized();
+
+    /// <summary>检查 mDNS 发现是否已启动并处于活跃状态。0=否，1=是。</summary>
+    [DllImport(DLL, CallingConvention = CC)]
+    public static extern byte IsMdnsActive();
 
     #endregion
 

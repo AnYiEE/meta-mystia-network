@@ -66,7 +66,11 @@ pub struct NetworkConfig {
     // --- u16 capacity/keepalive fields -----------------------------------
     /// capacity of each peer's outgoing send queue
     pub send_queue_capacity: usize,
-    /// maximum number of simultaneous TCP connections
+    /// maximum number of simultaneous peer connections. Each peer
+    /// uses up to two TCP sockets (control channel + data channel),
+    /// so the actual TCP socket count may be up to `2 × max_connections`.
+    /// Data-channel connections for already-connected peers do **not**
+    /// count towards this limit.
     pub max_connections: usize,
     /// idle time (seconds) before the first keepalive probe is sent.
     pub keepalive_time_secs: u16,
@@ -100,7 +104,12 @@ pub struct NetworkConfig {
     pub manual_override_recovery: ManualOverrideRecovery,
     /// if `true`, disable Nagle's algorithm (`TCP_NODELAY`) on every
     /// TCP connection. This reduces latency for small messages at the
-    /// cost of slightly higher bandwidth usage. Default: `false`.
+    /// cost of slightly higher bandwidth usage. Default: `true`.
+    ///
+    /// For real-time applications (such as games) operating through
+    /// tunnels like frp or tailscale, disabling Nagle is strongly
+    /// recommended to avoid stacking extra latency on top of the
+    /// tunnel's own buffering.
     pub tcp_nodelay: bool,
 }
 
@@ -125,7 +134,7 @@ impl Default for NetworkConfig {
             centralized_auto_forward: true,
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
-            tcp_nodelay: false,
+            tcp_nodelay: true,
         }
     }
 }
@@ -253,8 +262,8 @@ mod tests {
     fn test_tcp_nodelay_default_in_config() {
         let cfg = NetworkConfig::default();
         assert!(
-            !cfg.tcp_nodelay,
-            "tcp_nodelay should default to false (Nagle enabled)"
+            cfg.tcp_nodelay,
+            "tcp_nodelay should default to true (Nagle disabled)"
         );
     }
 }

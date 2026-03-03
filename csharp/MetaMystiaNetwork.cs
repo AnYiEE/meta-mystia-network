@@ -39,7 +39,7 @@ namespace MetaMystiaNetworkBindings
     /// <summary>The per-peer outgoing send queue is full; the message was discarded.</summary>
     public const int SendQueueFull = -7;
 
-    /// <summary>Message payload exceeds the 1 MB hard limit.</summary>
+    /// <summary>Message payload exceeds the configured max_message_size (default: 256 KiB).</summary>
     public const int MessageTooLarge = -8;
 
     /// <summary>Internal serialization / deserialization failure (postcard).</summary>
@@ -223,7 +223,8 @@ namespace MetaMystiaNetworkBindings
 
     /// <summary>
     /// LZ4 compression threshold (bytes). Payloads larger than this value are
-    /// automatically compressed. Set to <c>0</c> to disable. Default: 512.
+    /// automatically compressed. Set to <c>0</c> to compress all non-empty
+    /// payloads. Default: 512.
     /// </summary>
     public uint compression_threshold;
 
@@ -328,7 +329,7 @@ namespace MetaMystiaNetworkBindings
     /// <summary>
     /// <c>1</c> = disable Nagle's algorithm (<c>TCP_NODELAY</c>) on every TCP
     /// connection, reducing latency for small messages at the cost of slightly
-    /// higher bandwidth usage; <c>0</c> = keep Nagle enabled (default). Default: 0.
+    /// higher bandwidth usage (default); <c>0</c> = keep Nagle enabled. Default: 1.
     /// </summary>
     public byte tcp_nodelay;
 
@@ -358,7 +359,7 @@ namespace MetaMystiaNetworkBindings
       centralized_auto_forward = 1,
       auto_election_enabled = 1,
       manual_override_recovery = (byte)ManualOverrideRecovery.Hold,
-      tcp_nodelay = 0,
+      tcp_nodelay = 1,
     };
   }
 
@@ -403,7 +404,7 @@ namespace MetaMystiaNetworkBindings
   /// </summary>
   /// <remarks>See <see cref="ReceiveCallback"/> for threading and lifetime constraints.</remarks>
   /// <param name="peerId">Pointer to the affected peer's ID string.</param>
-  /// <param name="status">New state: 0 = Connected, 1 = Disconnected, 2 = Reconnecting.</param>
+  /// <param name="status">New state: 0 = Connected, 1 = Disconnected, 2 = Reconnecting, 3 = Handshaking.</param>
   [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
   public delegate void PeerStatusCallback(IntPtr peerId, int status);
 

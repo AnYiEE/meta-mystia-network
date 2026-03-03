@@ -15,7 +15,7 @@ use crate::protocol::{InternalMessage, msg_types};
 ///   flag bits.
 /// - `payload` holds either raw bytes or the serialized
 ///   `InternalMessage` when `msg_type` is internal.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RawPacket {
     pub msg_type: u16,
     pub flags: u8,
@@ -105,20 +105,7 @@ pub fn encode_internal(
         return Err(NetworkError::MessageTooLarge(payload.len() as u32));
     }
 
-    let msg_type = match msg {
-        InternalMessage::Handshake { .. } => msg_types::HANDSHAKE,
-        InternalMessage::HandshakeAck { .. } => msg_types::HANDSHAKE_ACK,
-        InternalMessage::PeerLeave { .. } => msg_types::PEER_LEAVE,
-        InternalMessage::PeerListSync { .. } => msg_types::PEER_LIST_SYNC,
-        InternalMessage::Heartbeat { .. } => msg_types::HEARTBEAT,
-        InternalMessage::HeartbeatResponse { .. } => msg_types::HEARTBEAT_RESPONSE,
-        InternalMessage::Ping { .. } => msg_types::PING,
-        InternalMessage::Pong { .. } => msg_types::PONG,
-        InternalMessage::RequestVote { .. } => msg_types::REQUEST_VOTE,
-        InternalMessage::VoteResponse { .. } => msg_types::VOTE_RESPONSE,
-        InternalMessage::LeaderAssign { .. } => msg_types::LEADER_ASSIGN,
-        InternalMessage::ForwardedUserData { .. } => msg_types::FORWARDED_USER_DATA,
-    };
+    let msg_type = msg.msg_type();
 
     Ok(RawPacket {
         msg_type,
@@ -351,15 +338,24 @@ mod tests {
                 original_flags: 0x02,
                 payload: vec![1, 2, 3],
             },
+            InternalMessage::DataChannelHandshake {
+                peer_id: "peer1".into(),
+            },
+            InternalMessage::DataChannelHandshakeAck {
+                peer_id: "peer2".into(),
+                success: true,
+            },
         ];
 
         for msg in &messages {
             let packet = encode_internal(msg, max).unwrap();
             assert!(packet.is_internal());
+            assert_eq!(packet.msg_type, msg.msg_type());
             let decoded = decode_internal(&packet).unwrap();
-            let re_encoded = encode_internal(&decoded, max).unwrap();
-            assert_eq!(packet.payload, re_encoded.payload);
-            assert_eq!(packet.msg_type, re_encoded.msg_type);
+            assert_eq!(
+                msg, &decoded,
+                "round-trip decode should produce the original message"
+            );
         }
     }
 }

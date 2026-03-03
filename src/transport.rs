@@ -18,8 +18,18 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{NetworkConfig, PROTOCOL_VERSION};
 use crate::error::NetworkError;
 use crate::messaging::{RawPacket, decode_internal, encode_internal};
-use crate::protocol::InternalMessage;
+use crate::protocol::{InternalMessage, msg_types};
 use crate::types::{PeerId, PeerInfo, PeerStatus};
+
+/// Duration for `SO_LINGER` on TCP sockets. A non-zero linger
+/// causes the kernel to send RST on close instead of entering
+/// TIME_WAIT, preventing ghost connections through tunneled networks.
+const SO_LINGER_DURATION: Duration = Duration::from_secs(2);
+
+/// Delay before initiating the data channel after control-channel
+/// registration. Gives both sides time to finish the control
+/// handshake before the data-channel TCP connection arrives.
+const DATA_CHANNEL_OPEN_DELAY: Duration = Duration::from_millis(50);
 
 /// Codec used by `tokio_util::codec::Framed` to frame and
 /// de-frame `RawPacket`s. Each encoded packet consists of a 7-byte
@@ -85,10 +95,24 @@ impl Encoder<RawPacket> for PacketCodec {
 
 /// Internal state for an active connection to a peer. Stored in
 /// the `TransportManager::connections` map.
+///
+/// Each peer has a **control channel** (always present) that carries
+/// internal protocol messages (heartbeat, election, handshake, ...)
+/// and an optional **data channel** dedicated to user payloads.
+/// When the data channel is not yet established or has broken, user
+/// messages fall back transparently to the control channel.
 struct PeerConnection {
-    send_tx: mpsc::Sender<RawPacket>, // channel for outbound packets
-    cancel_token: CancellationToken,  // used to shut down reader/writer tasks
-    info: PeerInfo,                   // metadata about the peer
+    /// Sender for the control channel (internal messages).
+    control_tx: mpsc::Sender<RawPacket>,
+    /// Sender for the data channel (user messages). `None` until
+    /// the data-channel handshake completes, or after it drops.
+    data_tx: Option<mpsc::Sender<RawPacket>>,
+    /// Token to shut down control-channel read/write tasks.
+    control_cancel: CancellationToken,
+    /// Token to shut down data-channel read/write tasks (if active).
+    data_cancel: Option<CancellationToken>,
+    /// Metadata about the peer.
+    info: PeerInfo,
 }
 
 /// Manages TCP connections to peers. Responsible for accepting
@@ -171,8 +195,17 @@ impl TransportManager {
     }
 
     /// Task run by `new()` that accepts inbound TCP sockets and
-    /// spawns a handler for each. Respects the shutdown token and
-    /// honour the `max_connections` config limit.
+    /// spawns a handler for each. Respects the shutdown token.
+    ///
+    /// The `max_connections` limit is **not** enforced here because
+    /// at accept time we cannot distinguish a new-peer handshake from
+    /// a data-channel handshake. Rejecting early would prevent
+    /// existing peers from establishing their data channels when the
+    /// peer count has already reached the limit.
+    ///
+    /// Instead, `handle_incoming_connection` checks the limit after
+    /// reading the first framed packet and determining the connection
+    /// type.
     async fn accept_loop(self: &Arc<Self>, listener: TcpListener) {
         loop {
             tokio::select! {
@@ -180,10 +213,6 @@ impl TransportManager {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
-                            if self.connections.read().len() >= self.config.max_connections {
-                                tracing::warn!(%addr, "max connections reached, rejecting");
-                                continue;
-                            }
                             let mgr = Arc::clone(self);
                             tokio::spawn(async move {
                                 if let Err(e) = mgr.handle_incoming_connection(stream, addr).await {
@@ -200,9 +229,11 @@ impl TransportManager {
         }
     }
 
-    /// Apply platform-specific TCP keepalive and optional
-    /// `TCP_NODELAY` settings to a stream. Used for both incoming
-    /// and outgoing connections to detect dead peers.
+    /// Apply platform-specific TCP keepalive, `TCP_NODELAY`, and
+    /// `SO_LINGER` settings to a stream. Used for both incoming and
+    /// outgoing connections to detect dead peers and eliminate ghost
+    /// connections (stale TIME_WAIT entries through frp/tailscale
+    /// tunnels).
     fn configure_socket(stream: &TcpStream, config: &NetworkConfig) -> Result<(), NetworkError> {
         use socket2::SockRef;
 
@@ -215,10 +246,8 @@ impl TransportManager {
         let keepalive = keepalive.with_retries(config.keepalive_retries.into());
 
         sock.set_tcp_keepalive(&keepalive)?;
-
-        if config.tcp_nodelay {
-            stream.set_nodelay(true)?;
-        }
+        sock.set_linger(Some(SO_LINGER_DURATION))?;
+        stream.set_nodelay(config.tcp_nodelay)?;
 
         Ok(())
     }
@@ -226,6 +255,10 @@ impl TransportManager {
     /// Perform handshake on a newly accepted connection, then
     /// register it and start reader/writer tasks. Returns an error if
     /// handshake fails (including version/session mismatch).
+    ///
+    /// If the first message is a [`DataChannelHandshake`] instead of
+    /// a normal [`Handshake`], delegates to
+    /// [`handle_incoming_data_channel_framed`].
     async fn handle_incoming_connection(
         self: &Arc<Self>,
         stream: TcpStream,
@@ -235,14 +268,47 @@ impl TransportManager {
 
         let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
 
-        let handshake_result = tokio::time::timeout(
+        // Read first packet with a timeout to determine connection type.
+        let first_packet = tokio::time::timeout(
             Duration::from_millis(self.config.handshake_timeout_ms.into()),
-            self.receive_handshake(&mut framed),
+            framed.next(),
         )
         .await;
 
+        let packet = match first_packet {
+            Ok(Some(Ok(pkt))) => pkt,
+            Ok(Some(Err(e))) => return Err(e),
+            Ok(None) => {
+                return Err(NetworkError::HandshakeFailed("connection closed".into()));
+            }
+            Err(_) => {
+                tracing::warn!(%addr, "handshake timeout");
+                return Err(NetworkError::HandshakeTimeout);
+            }
+        };
+
+        // Route to data-channel handler if this is a DataChannelHandshake.
+        // Data channels are for *existing* peers, so the
+        // max_connections limit does not apply.
+        if packet.msg_type == msg_types::DATA_CHANNEL_HANDSHAKE {
+            return self
+                .handle_incoming_data_channel_framed(framed, addr, packet)
+                .await;
+        }
+
+        // For new peer handshakes, enforce the max_connections limit.
+        if self.connections.read().len() >= self.config.max_connections {
+            tracing::warn!(%addr, "max connections reached, rejecting handshake");
+            return Err(NetworkError::MaxConnectionsReached);
+        }
+
+        // Proceed with normal control-channel handshake.
+        let msg = decode_internal(&packet)?;
+
+        let handshake_result = self.process_handshake_message(msg, &mut framed).await;
+
         match handshake_result {
-            Ok(Ok((peer_id, listen_port, notify_packet))) => {
+            Ok((peer_id, listen_port, notify_packet)) => {
                 let peer_addr = SocketAddr::new(addr.ip(), listen_port);
                 match self.register_connection(peer_id.clone(), peer_addr, framed) {
                     Ok(()) => {
@@ -250,42 +316,28 @@ impl TransportManager {
                         Ok(())
                     }
                     Err(NetworkError::DuplicatePeerId(id)) => {
-                        // TOCTOU: another path registered this peer between
-                        // receive_handshake check and register_connection.
                         tracing::debug!(peer = %id, "inbound TOCTOU duplicate, keeping existing");
                         Ok(())
                     }
                     Err(e) => Err(e),
                 }
             }
-            Ok(Err(NetworkError::AlreadyConnected(ref pid))) => {
+            Err(NetworkError::AlreadyConnected(ref pid)) => {
                 tracing::debug!(%addr, peer = %pid, "inbound connection from already-connected peer, keeping existing");
                 Ok(())
             }
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                tracing::warn!(%addr, "handshake timeout");
-                Err(NetworkError::HandshakeTimeout)
-            }
+            Err(e) => Err(e),
         }
     }
 
-    /// Read and validate a `Handshake` message from the peer,
-    /// replying with a corresponding `HandshakeAck`. On success
-    /// returns the remote `PeerId`, its listen port, and a packet
-    /// that should be broadcast to notify other modules of the new
-    /// connection.
-    async fn receive_handshake(
+    /// Process a normal `Handshake` message that was already read
+    /// from the framed stream. On success returns the remote
+    /// `PeerId`, its listen port, and a notification packet.
+    async fn process_handshake_message(
         &self,
+        msg: InternalMessage,
         framed: &mut Framed<TcpStream, PacketCodec>,
     ) -> Result<(PeerId, u16, RawPacket), NetworkError> {
-        let packet = framed
-            .next()
-            .await
-            .ok_or_else(|| NetworkError::HandshakeFailed("connection closed".into()))??;
-
-        let msg = decode_internal(&packet)?;
-
         match msg {
             InternalMessage::Handshake {
                 peer_id,
@@ -331,10 +383,6 @@ impl TransportManager {
 
                 let pid = PeerId::new(&peer_id);
                 if self.connections.read().contains_key(&pid) {
-                    // The peer is already connected (likely via mDNS auto-connect).
-                    // Send success so the remote side does not treat this as an error,
-                    // then return AlreadyConnected so the caller discards the duplicate
-                    // TCP stream while keeping the existing connection alive.
                     let ack = encode_internal(
                         &InternalMessage::HandshakeAck {
                             peer_id: self.local_peer_id.as_str().to_owned(),
@@ -384,6 +432,47 @@ impl TransportManager {
             }
             _ => Err(NetworkError::HandshakeFailed(
                 "expected Handshake message".into(),
+            )),
+        }
+    }
+
+    /// Handle a data-channel handshake on a framed stream whose first
+    /// packet has already been read and determined to be a
+    /// `DataChannelHandshake`.
+    async fn handle_incoming_data_channel_framed(
+        self: &Arc<Self>,
+        mut framed: Framed<TcpStream, PacketCodec>,
+        addr: SocketAddr,
+        packet: RawPacket,
+    ) -> Result<(), NetworkError> {
+        let msg = decode_internal(&packet)?;
+        match msg {
+            InternalMessage::DataChannelHandshake { peer_id } => {
+                let pid = PeerId::new(peer_id);
+                let known = self.connections.read().contains_key(&pid);
+                let ack = encode_internal(
+                    &InternalMessage::DataChannelHandshakeAck {
+                        peer_id: self.local_peer_id.as_str().to_owned(),
+                        success: known,
+                    },
+                    self.config.max_message_size,
+                )?;
+                framed.send(ack).await.map_err(|e| {
+                    NetworkError::ConnectionFailed(format!(
+                        "failed to send DataChannelHandshakeAck: {e}"
+                    ))
+                })?;
+                if !known {
+                    return Err(NetworkError::HandshakeFailed(format!(
+                        "data channel from unknown peer {pid}"
+                    )));
+                }
+                self.register_data_channel(&pid, framed);
+                tracing::info!(peer = %pid, addr = %addr, "data channel established (inbound)");
+                Ok(())
+            }
+            _ => Err(NetworkError::HandshakeFailed(
+                "expected DataChannelHandshake".into(),
             )),
         }
     }
@@ -519,6 +608,9 @@ impl TransportManager {
     /// socket alive and feed incoming packets back to the network
     /// state. Also handles cleanup and reconnection logic when the
     /// socket closes.
+    ///
+    /// This registers the **control channel** for the peer. The data
+    /// channel is established separately via [`open_data_channel`].
     fn register_connection(
         self: &Arc<Self>,
         peer_id: PeerId,
@@ -539,14 +631,16 @@ impl TransportManager {
             conns.insert(
                 peer_id.clone(),
                 PeerConnection {
-                    send_tx,
-                    cancel_token: cancel_token.clone(),
+                    control_tx: send_tx,
+                    data_tx: None,
+                    control_cancel: cancel_token.clone(),
+                    data_cancel: None,
                     info,
                 },
             );
         }
 
-        tracing::info!(peer = %peer_id, addr = %peer_addr, "peer connected");
+        tracing::info!(peer = %peer_id, addr = %peer_addr, "peer connected (control channel)");
 
         let write_cancel = cancel_token.clone();
         tokio::spawn(async move {
@@ -557,7 +651,7 @@ impl TransportManager {
                         match msg {
                             Some(packet) => {
                                 if let Err(e) = sink.send(packet).await {
-                                    tracing::warn!(error = %e, "write task send error");
+                                    tracing::warn!(error = %e, "control write task send error");
                                     break;
                                 }
                             }
@@ -585,11 +679,11 @@ impl TransportManager {
                                 }
                             }
                             Some(Err(e)) => {
-                                tracing::warn!(peer = %read_peer_id, error = %e, "read error");
+                                tracing::warn!(peer = %read_peer_id, error = %e, "control read error");
                                 break;
                             }
                             None => {
-                                tracing::info!(peer = %read_peer_id, "connection closed by remote");
+                                tracing::info!(peer = %read_peer_id, "control channel closed by remote");
                                 break;
                             }
                         }
@@ -601,7 +695,10 @@ impl TransportManager {
                 let mut conns = connections.write();
                 if let Some(conn) = conns.get_mut(&read_peer_id) {
                     conn.info.status = PeerStatus::Disconnected;
-                    conn.cancel_token.cancel();
+                    conn.control_cancel.cancel();
+                    if let Some(dc) = conn.data_cancel.take() {
+                        dc.cancel();
+                    }
                     let addr = if conn.info.should_reconnect && !mgr.shutdown_token.is_cancelled() {
                         Some(conn.info.addr.to_string())
                     } else {
@@ -618,6 +715,27 @@ impl TransportManager {
                 mgr.spawn_reconnect(read_peer_id, addr);
             }
         });
+
+        // After successful control-channel registration, attempt to
+        // open the data channel asynchronously. To avoid races where
+        // both sides simultaneously open data channels (and the stale
+        // cleanup wipes the surviving one), only the peer with the
+        // lexicographically smaller ID initiates the data channel.
+        if self.local_peer_id.as_str() < peer_id.as_str() {
+            let mgr = Arc::clone(self);
+            let data_peer_id = peer_id.clone();
+            let data_peer_addr = peer_addr;
+            tokio::spawn(async move {
+                tokio::time::sleep(DATA_CHANNEL_OPEN_DELAY).await;
+                if let Err(e) = mgr.open_data_channel(&data_peer_id, data_peer_addr).await {
+                    tracing::debug!(
+                        peer = %data_peer_id,
+                        error = %e,
+                        "data channel open failed, using control channel as fallback"
+                    );
+                }
+            });
+        }
 
         Ok(())
     }
@@ -661,15 +779,181 @@ impl TransportManager {
         });
     }
 
-    /// Enqueue a packet to be sent to a specific peer. Returns an
-    /// error if the peer is unknown or the send queue is full/closed.
+    /// Open a dedicated data channel to a peer that already has
+    /// a control channel registered. The initiator opens a new TCP
+    /// connection, sends [`DataChannelHandshake`], waits for an ack,
+    /// then registers the stream.
+    async fn open_data_channel(
+        self: &Arc<Self>,
+        peer_id: &PeerId,
+        peer_addr: SocketAddr,
+    ) -> Result<(), NetworkError> {
+        // Only open once
+        {
+            let conns = self.connections.read();
+            match conns.get(peer_id) {
+                Some(c) if c.data_tx.is_some() => return Ok(()),
+                None => return Err(NetworkError::PeerNotFound(peer_id.to_string())),
+                _ => {}
+            }
+        }
+
+        let stream = tokio::time::timeout(
+            Duration::from_millis(self.config.handshake_timeout_ms.into()),
+            TcpStream::connect(peer_addr),
+        )
+        .await
+        .map_err(|_| NetworkError::HandshakeTimeout)?
+        .map_err(|e| {
+            NetworkError::ConnectionFailed(format!("data channel TCP connect failed: {e}"))
+        })?;
+
+        Self::configure_socket(&stream, &self.config)?;
+
+        let mut framed = Framed::new(stream, PacketCodec::new(self.config.max_message_size));
+
+        let hs = encode_internal(
+            &InternalMessage::DataChannelHandshake {
+                peer_id: self.local_peer_id.as_str().to_owned(),
+            },
+            self.config.max_message_size,
+        )?;
+        framed.send(hs).await.map_err(|e| {
+            NetworkError::ConnectionFailed(format!("failed to send DataChannelHandshake: {e}"))
+        })?;
+
+        let ack = tokio::time::timeout(
+            Duration::from_millis(self.config.handshake_timeout_ms.into()),
+            framed.next(),
+        )
+        .await
+        .map_err(|_| NetworkError::HandshakeTimeout)?
+        .ok_or_else(|| NetworkError::HandshakeFailed("data channel closed".into()))??;
+
+        let msg = decode_internal(&ack)?;
+        match msg {
+            InternalMessage::DataChannelHandshakeAck { success, .. } if success => {}
+            _ => {
+                return Err(NetworkError::HandshakeFailed(
+                    "data channel handshake rejected".into(),
+                ));
+            }
+        }
+
+        self.register_data_channel(peer_id, framed);
+
+        tracing::info!(peer = %peer_id, "data channel established (outbound)");
+        Ok(())
+    }
+
+    /// Attach a framed TCP stream as the data channel for an
+    /// already-registered peer.
+    fn register_data_channel(
+        self: &Arc<Self>,
+        peer_id: &PeerId,
+        framed: Framed<TcpStream, PacketCodec>,
+    ) {
+        let (mut sink, mut stream) = framed.split();
+        let (send_tx, mut send_rx) = mpsc::channel::<RawPacket>(self.config.send_queue_capacity);
+        let cancel_token = self.shutdown_token.child_token();
+
+        {
+            let mut conns = self.connections.write();
+            if let Some(conn) = conns.get_mut(peer_id) {
+                // Cancel any previous data channel
+                if let Some(dc) = conn.data_cancel.take() {
+                    dc.cancel();
+                }
+                conn.data_tx = Some(send_tx);
+                conn.data_cancel = Some(cancel_token.clone());
+            } else {
+                tracing::debug!(peer = %peer_id, "data channel setup aborted: peer removed from connections");
+                return;
+            }
+        }
+
+        // Write task for data channel
+        let write_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = write_cancel.cancelled() => break,
+                    msg = send_rx.recv() => {
+                        match msg {
+                            Some(packet) => {
+                                if let Err(e) = sink.send(packet).await {
+                                    tracing::warn!(error = %e, "data write task send error");
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        // Read task for data channel — feeds packets into the same
+        // `incoming_tx` as the control channel.
+        let read_cancel = cancel_token.clone();
+        let read_peer_id = peer_id.clone();
+        let incoming_tx = self.incoming_tx.clone();
+        let connections = Arc::clone(&self.connections);
+        let cleanup_token = cancel_token.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = read_cancel.cancelled() => break,
+                    frame = stream.next() => {
+                        match frame {
+                            Some(Ok(packet)) => {
+                                if incoming_tx.send((read_peer_id.clone(), packet)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(peer = %read_peer_id, error = %e, "data channel read error");
+                                break;
+                            }
+                            None => {
+                                tracing::debug!(peer = %read_peer_id, "data channel closed by remote");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            // Data channel broke — clear it so future sends fall back
+            // to control. Only clear if OUR cancel token was NOT
+            // externally cancelled (which would mean a newer data
+            // channel replaced us via register_data_channel).
+            if !cleanup_token.is_cancelled() {
+                let mut conns = connections.write();
+                if let Some(conn) = conns.get_mut(&read_peer_id) {
+                    conn.data_tx = None;
+                    conn.data_cancel = None;
+                }
+            }
+        });
+    }
+
+    /// Enqueue a packet to be sent to a specific peer. Internal
+    /// protocol messages are routed to the **control channel**;
+    /// user messages prefer the **data channel** and fall back to
+    /// the control channel when the data channel is unavailable.
     pub fn send_to_peer(&self, peer_id: &PeerId, packet: RawPacket) -> Result<(), NetworkError> {
         let conns = self.connections.read();
         let conn = conns
             .get(peer_id)
             .ok_or_else(|| NetworkError::PeerNotFound(peer_id.to_string()))?;
 
-        conn.send_tx.try_send(packet).map_err(|e| match e {
+        let tx = if packet.is_internal() {
+            &conn.control_tx
+        } else {
+            conn.data_tx.as_ref().unwrap_or(&conn.control_tx)
+        };
+
+        tx.try_send(packet).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => NetworkError::SendQueueFull,
             mpsc::error::TrySendError::Closed(_) => {
                 NetworkError::ConnectionFailed("send channel closed".into())
@@ -678,13 +962,16 @@ impl TransportManager {
     }
 
     /// Send the same packet to all connected peers, optionally
-    /// excluding a list. Returns a list of peers that failed to
-    /// receive the packet along with the error.
+    /// excluding a list. Internal messages are sent on the control
+    /// channel; user messages prefer the data channel. Returns a
+    /// list of peers that failed to receive the packet along with
+    /// the error.
     pub fn broadcast(
         &self,
         packet: RawPacket,
         exclude: Option<&[PeerId]>,
     ) -> Vec<(PeerId, NetworkError)> {
+        let use_data = !packet.is_internal();
         let targets: Vec<(PeerId, mpsc::Sender<RawPacket>)> = {
             let conns = self.connections.read();
             conns
@@ -693,7 +980,14 @@ impl TransportManager {
                     conn.info.status == PeerStatus::Connected
                         && !exclude.is_some_and(|excl| excl.contains(pid))
                 })
-                .map(|(pid, conn)| (pid.clone(), conn.send_tx.clone()))
+                .map(|(pid, conn)| {
+                    let tx = if use_data {
+                        conn.data_tx.as_ref().unwrap_or(&conn.control_tx).clone()
+                    } else {
+                        conn.control_tx.clone()
+                    };
+                    (pid.clone(), tx)
+                })
                 .collect()
         };
 
@@ -730,7 +1024,10 @@ impl TransportManager {
         let mut conns = self.connections.write();
         if let Some(conn) = conns.get_mut(peer_id) {
             conn.info.should_reconnect = false;
-            conn.cancel_token.cancel();
+            conn.control_cancel.cancel();
+            if let Some(dc) = conn.data_cancel.take() {
+                dc.cancel();
+            }
         }
         conns.remove(peer_id);
 
@@ -761,9 +1058,14 @@ impl TransportManager {
         loop {
             let all_empty = {
                 let conns = self.connections.read();
-                conns
-                    .values()
-                    .all(|c| c.send_tx.capacity() == c.send_tx.max_capacity())
+                conns.values().all(|c| {
+                    let ctrl_empty = c.control_tx.capacity() == c.control_tx.max_capacity();
+                    let data_empty = c
+                        .data_tx
+                        .as_ref()
+                        .is_none_or(|d| d.capacity() == d.max_capacity());
+                    ctrl_empty && data_empty
+                })
             };
             if all_empty || tokio::time::Instant::now() >= deadline {
                 break;
@@ -778,7 +1080,10 @@ impl TransportManager {
         let mut conns = self.connections.write();
         for conn in conns.values_mut() {
             conn.info.should_reconnect = false;
-            conn.cancel_token.cancel();
+            conn.control_cancel.cancel();
+            if let Some(dc) = conn.data_cancel.take() {
+                dc.cancel();
+            }
         }
         conns.clear();
         tracing::info!("transport shutdown complete");
@@ -858,6 +1163,15 @@ impl TransportManager {
     /// Return the last-known socket address for the peer.
     pub fn get_peer_addr(&self, peer_id: &PeerId) -> Option<SocketAddr> {
         self.connections.read().get(peer_id).map(|c| c.info.addr)
+    }
+
+    /// Check whether the data channel is established for a peer.
+    #[cfg(test)]
+    pub(crate) fn has_data_channel(&self, peer_id: &PeerId) -> bool {
+        self.connections
+            .read()
+            .get(peer_id)
+            .is_some_and(|c| c.data_tx.is_some())
     }
 }
 
@@ -1042,5 +1356,213 @@ mod tests {
         // Existing connection unaffected
         assert_eq!(tm_a.connection_count(), 1);
         assert_eq!(tm_b.connection_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_data_channel_established_after_connect() {
+        let (tm_a, _rx_a) = make_transport("peer_a", "session").await;
+        let (tm_b, _rx_b) = make_transport("peer_b", "session").await;
+
+        let addr_a = format!("127.0.0.1:{}", tm_a.listener_addr().port());
+        tm_b.connect_to(&addr_a).await.unwrap();
+
+        // Control channel should be up quickly
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(tm_a.has_peer(&PeerId::new("peer_b")));
+        assert!(tm_b.has_peer(&PeerId::new("peer_a")));
+
+        // Data channel opens asynchronously — give it ample time for
+        // both sides to complete the handshake.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let a_has = tm_a.has_data_channel(&PeerId::new("peer_b"));
+        let b_has = tm_b.has_data_channel(&PeerId::new("peer_a"));
+        assert!(
+            a_has || b_has,
+            "expected at least one side to have a data channel (a={a_has}, b={b_has})"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dual_channel_message_routing() {
+        let (tm_a, mut rx_a) = make_transport("peer_a", "session").await;
+        let (tm_b, _rx_b) = make_transport("peer_b", "session").await;
+
+        let addr_a = format!("127.0.0.1:{}", tm_a.listener_addr().port());
+        tm_b.connect_to(&addr_a).await.unwrap();
+
+        // Wait for data channel to be established
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Drain handshake notification(s) produced during connection
+        // setup so they don't interfere with the assertions below.
+        while tokio::time::timeout(Duration::from_millis(100), rx_a.recv())
+            .await
+            .is_ok()
+        {}
+
+        // Send a user message (msg_type >= USER_MESSAGE_START) via the
+        // data channel.
+        let user_packet = RawPacket {
+            msg_type: msg_types::USER_MESSAGE_START,
+            flags: 0,
+            payload: Bytes::from_static(b"hello via data channel"),
+        };
+        tm_b.send_to_peer(&PeerId::new("peer_a"), user_packet)
+            .unwrap();
+
+        // Send an internal message (msg_type < 0x0100) via the control
+        // channel. Use PING to avoid colliding with the HANDSHAKE
+        // notification already drained above.
+        let internal_packet = RawPacket {
+            msg_type: msg_types::PING,
+            flags: 0,
+            payload: Bytes::from_static(b"internal"),
+        };
+        tm_b.send_to_peer(&PeerId::new("peer_a"), internal_packet)
+            .unwrap();
+
+        // Both messages should arrive at tm_a
+        let mut received_user = false;
+        let mut received_internal = false;
+
+        for _ in 0..20 {
+            match tokio::time::timeout(Duration::from_millis(200), rx_a.recv()).await {
+                Ok(Some((_pid, pkt))) => {
+                    if pkt.msg_type == msg_types::USER_MESSAGE_START {
+                        assert_eq!(pkt.payload.as_ref(), b"hello via data channel");
+                        received_user = true;
+                    } else if pkt.msg_type == msg_types::PING {
+                        received_internal = true;
+                    }
+                    if received_user && received_internal {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        assert!(received_user, "user message should be received");
+        assert!(received_internal, "internal message should be received");
+    }
+
+    #[tokio::test]
+    async fn test_socket_linger_configured() {
+        use socket2::SockRef;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).await.unwrap();
+
+        let config = NetworkConfig::default();
+        TransportManager::configure_socket(&stream, &config).unwrap();
+
+        let sock = SockRef::from(&stream);
+        let linger = sock.linger().unwrap();
+        assert!(
+            linger.is_some(),
+            "SO_LINGER should be set after configure_socket"
+        );
+        assert_eq!(linger.unwrap(), SO_LINGER_DURATION);
+    }
+
+    #[tokio::test]
+    async fn test_data_channel_works_at_max_connections() {
+        let config = NetworkConfig {
+            max_connections: 2,
+            ..NetworkConfig::default()
+        };
+
+        // Create 3 nodes with the low limit.
+        let token_a = CancellationToken::new();
+        let (tm_a, mut rx_a) = TransportManager::new(
+            PeerId::new("peer_a"),
+            "session_dc".into(),
+            config,
+            token_a.clone(),
+        )
+        .await
+        .unwrap();
+
+        let token_b = CancellationToken::new();
+        let (tm_b, _rx_b) = TransportManager::new(
+            PeerId::new("peer_b"),
+            "session_dc".into(),
+            config,
+            token_b.clone(),
+        )
+        .await
+        .unwrap();
+
+        let token_c = CancellationToken::new();
+        let (tm_c, _rx_c) = TransportManager::new(
+            PeerId::new("peer_c"),
+            "session_dc".into(),
+            config,
+            token_c.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Fill peer_a to max_connections = 2
+        let addr_a = format!("127.0.0.1:{}", tm_a.listener_addr().port());
+        tm_b.connect_to(&addr_a).await.unwrap();
+        tm_c.connect_to(&addr_a).await.unwrap();
+
+        // peer_a now has 2 peers — exactly at max_connections.
+        assert_eq!(tm_a.connection_count(), 2);
+
+        // Wait for data channels to establish.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // At least one side of each pair should have a data channel.
+        let b_has_dc = tm_a.has_data_channel(&PeerId::new("peer_b"))
+            || tm_b.has_data_channel(&PeerId::new("peer_a"));
+        let c_has_dc = tm_a.has_data_channel(&PeerId::new("peer_c"))
+            || tm_c.has_data_channel(&PeerId::new("peer_a"));
+
+        assert!(
+            b_has_dc,
+            "data channel for peer_b should work at max_connections"
+        );
+        assert!(
+            c_has_dc,
+            "data channel for peer_c should work at max_connections"
+        );
+
+        // Drain any pending handshake notifications.
+        while tokio::time::timeout(Duration::from_millis(50), rx_a.recv())
+            .await
+            .is_ok()
+        {}
+
+        // Verify user messages actually flow over the data channel.
+        let user_pkt = RawPacket {
+            msg_type: msg_types::USER_MESSAGE_START,
+            flags: 0,
+            payload: Bytes::from_static(b"at-limit"),
+        };
+        tm_b.send_to_peer(&PeerId::new("peer_a"), user_pkt).unwrap();
+
+        let mut got = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_millis(200), rx_a.recv()).await {
+                Ok(Some((_pid, pkt))) if pkt.msg_type == msg_types::USER_MESSAGE_START => {
+                    assert_eq!(pkt.payload.as_ref(), b"at-limit");
+                    got = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            got,
+            "user message should arrive via data channel at max_connections"
+        );
+
+        token_a.cancel();
+        token_b.cancel();
+        token_c.cancel();
     }
 }

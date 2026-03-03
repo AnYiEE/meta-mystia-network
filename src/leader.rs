@@ -360,38 +360,35 @@ impl LeaderElection {
     /// In both cases a leader-change notification with `None` is
     /// emitted so the application layer can react.
     pub fn handle_peer_left(&self, peer_id: &PeerId) {
-        let state = self.state.read();
-        if state.leader_id.as_ref() == Some(peer_id) {
-            let was_manual = state.manual_override;
-            drop(state);
-
-            let mut state = self.state.write();
-            state.leader_id = None;
-
-            if was_manual {
-                match self.manual_override_recovery {
-                    ManualOverrideRecovery::Hold => {
-                        // Keep manual_override active; upper layer decides next step.
-                        tracing::info!(
-                            peer = peer_id.as_str(),
-                            "manual leader left – holding override, waiting for upper layer"
-                        );
-                    }
-                    ManualOverrideRecovery::AutoElect => {
-                        state.manual_override = false;
-                        tracing::info!(
-                            peer = peer_id.as_str(),
-                            "manual leader left – clearing override, will auto-elect"
-                        );
-                    }
-                }
-            } else if state.role == Role::Follower {
-                // Will trigger election timeout naturally
-            }
-
-            drop(state);
-            self.notify_leader_change(None);
+        let mut state = self.state.write();
+        if state.leader_id.as_ref() != Some(peer_id) {
+            return;
         }
+
+        let was_manual = state.manual_override;
+        state.leader_id = None;
+
+        if was_manual {
+            match self.manual_override_recovery {
+                ManualOverrideRecovery::Hold => {
+                    // Keep manual_override active; upper layer decides next step.
+                    tracing::info!(
+                        peer = peer_id.as_str(),
+                        "manual leader left – holding override, waiting for upper layer"
+                    );
+                }
+                ManualOverrideRecovery::AutoElect => {
+                    state.manual_override = false;
+                    tracing::info!(
+                        peer = peer_id.as_str(),
+                        "manual leader left – clearing override, will auto-elect"
+                    );
+                }
+            }
+        }
+
+        drop(state);
+        self.notify_leader_change(None);
     }
 
     fn notify_leader_change(&self, leader: Option<PeerId>) {

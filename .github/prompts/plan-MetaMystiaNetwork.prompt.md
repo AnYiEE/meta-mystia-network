@@ -6,7 +6,7 @@
 
 **核心能力：**
 
-- TCP 全双工传输 + LZ4 透明压缩
+- TCP 双通道传输（控制通道 + 数据通道） + LZ4 透明压缩
 - mDNS 局域网自动发现 + 手动 IP 连接
 - 简化 Raft 自动选主 + 手动指定
 - 可选中心化模式（消息经 Leader 中转）
@@ -32,21 +32,21 @@
 
 ## 模块结构总览
 
-| 文件                    | 职责                                                                                 |
-| ----------------------- | ------------------------------------------------------------------------------------ |
-| `src/lib.rs`            | 模块声明 + 全局状态（`NetworkState`）+ tokio Runtime 生命周期管理                    |
-| `src/config.rs`         | 配置结构体 `NetworkConfig` + 常量定义                                                |
-| `src/types.rs`          | 公共类型：`PeerId`, `PeerInfo`, `PeerStatus`, `MessageTarget`, `ForwardTarget` 等    |
-| `src/protocol.rs`       | 协议常量（版本号、msg_type 定义、最大消息大小）+ InternalMessage 枚举                |
-| `src/transport.rs`      | TCP 连接管理、粘包处理（`PacketCodec`）、自动重连、TCP Keep-alive、发送/接收通道管理 |
-| `src/messaging.rs`      | 消息编解码、LZ4 压缩、序列化/反序列化                                                |
-| `src/membership.rs`     | Peer 列表管理、心跳检测、RTT 测量、在线状态、Peer ID 冲突检测                        |
-| `src/leader.rs`         | 简化 Raft Leader Election + 手动覆盖 + 2 节点特殊处理                                |
-| `src/session_router.rs` | 消息路由（Broadcast/ToPeer/ToLeader）+ 中心化模式 + 自动转发 + 发送队列管理          |
-| `src/discovery.rs`      | mDNS 服务注册/发现（含 session_id 房间隔离）+ 手动连接入口                           |
-| `src/callback.rs`       | 回调管理器：队列 + 专用线程调度 C# 回调                                              |
-| `src/ffi.rs`            | 所有 `extern "C"` 接口 + panic 捕获 + 字符串转换辅助 + 错误码                        |
-| `src/error.rs`          | 统一错误类型 `NetworkError` + 错误码常量 + 映射                                      |
+| 文件                    | 职责                                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `src/lib.rs`            | 模块声明 + 全局状态（`NetworkState`）+ tokio Runtime 生命周期管理                                             |
+| `src/config.rs`         | 配置结构体 `NetworkConfig` + 常量定义                                                                         |
+| `src/types.rs`          | 公共类型：`PeerId`, `PeerInfo`, `PeerStatus`, `MessageTarget`, `ForwardTarget` 等                             |
+| `src/protocol.rs`       | 协议常量（版本号、msg_type 定义、最大消息大小）+ InternalMessage 枚举                                         |
+| `src/transport.rs`      | TCP 双通道架构（控制通道 + 数据通道）、粘包处理（`PacketCodec`）、自动重连、TCP Keep-alive、发送/接收通道管理 |
+| `src/messaging.rs`      | 消息编解码、LZ4 压缩、序列化/反序列化                                                                         |
+| `src/membership.rs`     | Peer 列表管理、心跳检测、RTT 测量、在线状态、Peer ID 冲突检测                                                 |
+| `src/leader.rs`         | 简化 Raft Leader Election + 手动覆盖 + 2 节点特殊处理                                                         |
+| `src/session_router.rs` | 消息路由（Broadcast/ToPeer/ToLeader）+ 中心化模式 + 自动转发 + 发送队列管理                                   |
+| `src/discovery.rs`      | mDNS 服务注册/发现（含 session_id 房间隔离）+ 手动连接入口                                                    |
+| `src/callback.rs`       | 回调管理器：队列 + 专用线程调度 C# 回调                                                                       |
+| `src/ffi.rs`            | 所有 `extern "C"` 接口 + panic 捕获 + 字符串转换辅助 + 错误码                                                 |
+| `src/error.rs`          | 统一错误类型 `NetworkError` + 错误码常量 + 映射                                                               |
 
 ---
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// election, heartbeats and to carry forwarded user payloads. All
 /// internal traffic is serialized with `postcard` and transported
 /// using the `RawPacket` wrapper.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum InternalMessage {
     // --- connection handshake --------------------------------------------
     Handshake {
@@ -71,6 +71,47 @@ pub enum InternalMessage {
         original_flags: u8,
         payload: Vec<u8>,
     },
+
+    // --- dual-channel handshake (data channel establishment) ------------
+    // Sent on a newly opened TCP connection to attach it as the
+    // **data channel** for an already-connected peer. The control
+    // channel must have been established first via the normal
+    // `Handshake` / `HandshakeAck` flow.
+    DataChannelHandshake {
+        peer_id: String,
+    },
+    DataChannelHandshakeAck {
+        peer_id: String,
+        success: bool,
+    },
+}
+
+impl InternalMessage {
+    /// Return the wire-level `msg_type` code for this message.
+    ///
+    /// This is the canonical mapping between enum variants and the
+    /// numeric constants in [`msg_types`]. Used by [`encode_internal`]
+    /// to populate the `RawPacket` header.
+    ///
+    /// [`encode_internal`]: crate::messaging::encode_internal
+    pub fn msg_type(&self) -> u16 {
+        match self {
+            Self::Handshake { .. } => msg_types::HANDSHAKE,
+            Self::HandshakeAck { .. } => msg_types::HANDSHAKE_ACK,
+            Self::PeerLeave { .. } => msg_types::PEER_LEAVE,
+            Self::PeerListSync { .. } => msg_types::PEER_LIST_SYNC,
+            Self::Heartbeat { .. } => msg_types::HEARTBEAT,
+            Self::HeartbeatResponse { .. } => msg_types::HEARTBEAT_RESPONSE,
+            Self::Ping { .. } => msg_types::PING,
+            Self::Pong { .. } => msg_types::PONG,
+            Self::RequestVote { .. } => msg_types::REQUEST_VOTE,
+            Self::VoteResponse { .. } => msg_types::VOTE_RESPONSE,
+            Self::LeaderAssign { .. } => msg_types::LEADER_ASSIGN,
+            Self::ForwardedUserData { .. } => msg_types::FORWARDED_USER_DATA,
+            Self::DataChannelHandshake { .. } => msg_types::DATA_CHANNEL_HANDSHAKE,
+            Self::DataChannelHandshakeAck { .. } => msg_types::DATA_CHANNEL_HANDSHAKE_ACK,
+        }
+    }
 }
 
 pub mod msg_types {
@@ -96,7 +137,159 @@ pub mod msg_types {
     // forwarded payload
     pub const FORWARDED_USER_DATA: u16 = 0x0030;
 
+    // dual-channel handshake
+    pub const DATA_CHANNEL_HANDSHAKE: u16 = 0x0040;
+    pub const DATA_CHANNEL_HANDSHAKE_ACK: u16 = 0x0041;
+
     // user messages (>= 0x0100) are sent via RawPacket without
     // internal encoding
     pub const USER_MESSAGE_START: u16 = 0x0100;
+
+    /// Return all internal message type constants in definition order.
+    /// Used by tests to verify uniqueness and range invariants.
+    #[cfg(test)]
+    pub const fn all() -> [u16; 14] {
+        [
+            HANDSHAKE,
+            HANDSHAKE_ACK,
+            PEER_LEAVE,
+            PEER_LIST_SYNC,
+            HEARTBEAT,
+            HEARTBEAT_RESPONSE,
+            PING,
+            PONG,
+            REQUEST_VOTE,
+            VOTE_RESPONSE,
+            LEADER_ASSIGN,
+            FORWARDED_USER_DATA,
+            DATA_CHANNEL_HANDSHAKE,
+            DATA_CHANNEL_HANDSHAKE_ACK,
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_msg_type_returns_internal_range() {
+        let messages: Vec<InternalMessage> = vec![
+            InternalMessage::Handshake {
+                peer_id: "p".into(),
+                listen_port: 0,
+                protocol_version: 1,
+                session_id: "s".into(),
+            },
+            InternalMessage::HandshakeAck {
+                peer_id: "p".into(),
+                listen_port: 0,
+                success: true,
+                error_reason: None,
+            },
+            InternalMessage::PeerLeave {
+                peer_id: "p".into(),
+            },
+            InternalMessage::PeerListSync { peers: vec![] },
+            InternalMessage::Heartbeat {
+                term: 0,
+                leader_id: "p".into(),
+                timestamp_ms: 0,
+            },
+            InternalMessage::HeartbeatResponse {
+                term: 0,
+                timestamp_ms: 0,
+            },
+            InternalMessage::Ping { timestamp_ms: 0 },
+            InternalMessage::Pong { timestamp_ms: 0 },
+            InternalMessage::RequestVote {
+                term: 0,
+                candidate_id: "p".into(),
+            },
+            InternalMessage::VoteResponse {
+                term: 0,
+                voter_id: "p".into(),
+                granted: false,
+            },
+            InternalMessage::LeaderAssign {
+                term: 0,
+                leader_id: "p".into(),
+                assigner_id: "p".into(),
+            },
+            InternalMessage::ForwardedUserData {
+                from_peer_id: "p".into(),
+                original_msg_type: 0x0100,
+                original_flags: 0,
+                payload: vec![],
+            },
+            InternalMessage::DataChannelHandshake {
+                peer_id: "p".into(),
+            },
+            InternalMessage::DataChannelHandshakeAck {
+                peer_id: "p".into(),
+                success: true,
+            },
+        ];
+
+        for msg in &messages {
+            assert!(
+                msg.msg_type() < msg_types::USER_MESSAGE_START,
+                "{msg:?} has msg_type {:#06x} which is >= USER_MESSAGE_START",
+                msg.msg_type()
+            );
+        }
+    }
+
+    #[test]
+    fn test_msg_type_constants_unique() {
+        let codes = msg_types::all();
+        for (i, &a) in codes.iter().enumerate() {
+            for &b in &codes[i + 1..] {
+                assert_ne!(a, b, "duplicate msg_type constant: {a:#06x}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_msg_type_all_covers_every_constant() {
+        // 14 InternalMessage variants → 14 msg_type constants.
+        assert_eq!(msg_types::all().len(), 14);
+    }
+
+    #[test]
+    fn test_msg_type_expected_values() {
+        assert_eq!(
+            InternalMessage::Handshake {
+                peer_id: String::new(),
+                listen_port: 0,
+                protocol_version: 0,
+                session_id: String::new(),
+            }
+            .msg_type(),
+            msg_types::HANDSHAKE
+        );
+        assert_eq!(
+            InternalMessage::Ping { timestamp_ms: 0 }.msg_type(),
+            msg_types::PING
+        );
+        assert_eq!(
+            InternalMessage::DataChannelHandshake {
+                peer_id: String::new()
+            }
+            .msg_type(),
+            msg_types::DATA_CHANNEL_HANDSHAKE
+        );
+    }
+
+    #[test]
+    fn test_internal_message_partial_eq() {
+        let a = InternalMessage::Ping { timestamp_ms: 42 };
+        let b = InternalMessage::Ping { timestamp_ms: 42 };
+        let c = InternalMessage::Ping { timestamp_ms: 99 };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+
+        let d = InternalMessage::Pong { timestamp_ms: 42 };
+        assert_ne!(a, d, "different variants with same field value");
+    }
 }

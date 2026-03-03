@@ -17,7 +17,7 @@
 **RawPacket 结构体：**
 
 ```rust
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RawPacket {
     pub msg_type: u16,
     pub flags: u8,
@@ -57,11 +57,7 @@ impl RawPacket {
    ```rust
    pub fn encode_internal(msg: &InternalMessage, max_message_size: u32) -> Result<RawPacket, NetworkError> {
        let payload = postcard::to_allocvec(msg)?;
-       let msg_type = match msg {
-           InternalMessage::Handshake { .. } => msg_types::HANDSHAKE,
-           InternalMessage::HandshakeAck { .. } => msg_types::HANDSHAKE_ACK,
-           // ... 其他类型映射
-       };
+       let msg_type = msg.msg_type(); // 调用 InternalMessage::msg_type() 方法
        Ok(RawPacket { msg_type, flags: 0, payload })
    }
 
@@ -78,10 +74,13 @@ impl RawPacket {
 
 **核心结构：**
 
-- `PeerConnection`：管理一个到远程 peer 的 TCP 连接
+- `PeerConnection`：管理一个到远程 peer 的双通道 TCP 连接
   - 使用 `tokio_util::codec::Framed<TcpStream, PacketCodec>` 处理粘包
-  - 持有 `mpsc::Sender<RawPacket>` 用于发送队列
-  - 持有 `CancellationToken` 用于优雅关闭
+  - 持有 `control_tx: mpsc::Sender<RawPacket>` — 控制通道发送队列
+  - 持有 `data_tx: Option<mpsc::Sender<RawPacket>>` — 数据通道发送队列（可选，数据通道建立后赋值）
+  - 持有 `control_cancel: CancellationToken` — 控制通道关闭信号
+  - 持有 `data_cancel: Option<CancellationToken>` — 数据通道关闭信号
+  - 持有 `info: PeerInfo` — 对端信息
 - `TransportManager`：管理所有连接 + TCP listener
   - `local_peer_id: PeerId` — 本地 Peer ID
   - `session_id: String` — 用于握手验证
@@ -170,6 +169,11 @@ impl Encoder<RawPacket> for PacketCodec {
    - `accept` 循环，每个新连接 spawn 到 `handle_incoming_connection`
    - 连接数达到 `config.max_connections` 时拒绝新连接
 
+2a. **`configure_socket` 通用设置**：
+
+- 调用 `stream.set_nodelay(config.tcp_nodelay)` 设置 TCP_NODELAY
+- 设置 `SO_LINGER`，使用命名常量 `const SO_LINGER_DURATION: Duration = Duration::from_secs(2)`，确保关闭时最多等待 2 秒发送剩余数据
+
 2. **TCP Keep-alive（可配置）**：
    - 使用 `socket2` crate 设置 TCP 层 Keep-alive
    - `keepalive_time` = `config.keepalive_time_secs`（默认 60s）
@@ -177,11 +181,11 @@ impl Encoder<RawPacket> for PacketCodec {
    - `keepalive_retries` = `config.keepalive_retries`（默认 3，**仅 macOS/Linux**；Windows 无 `TCP_KEEPCNT`，跳过此设置而非报错）
    - 三个参数均由 `NetworkConfig` 字段控制，上层可通过 FFI 配置
 
-2b. **TCP_NODELAY（可选）**：
+2b. **TCP_NODELAY**：
 
-- 通过 `NetworkConfig::tcp_nodelay`（默认 `false`）控制
-- 启用时在 `configure_socket` 中调用 `stream.set_nodelay(true)`
-- 减少小消息延迟，适用于实时场景（如游戏、语音信令）
+- 通过 `NetworkConfig::tcp_nodelay`（默认 `true`）控制
+- 在 `configure_socket` 中无条件调用 `stream.set_nodelay(config.tcp_nodelay)`，无论值为 `true` 或 `false` 都会显式设置
+- 默认禁用 Nagle 算法，减少小消息延迟，适用于实时场景（如游戏、语音信令）；通过 frp/tailscale 隧道时尤为重要
 
 3. **连接握手（含超时）**：
    - 新 TCP 连接建立后，启动 `config.handshake_timeout_ms`（5s）计时器
@@ -209,7 +213,9 @@ impl Encoder<RawPacket> for PacketCodec {
 
 6. **消息发送接口**：
    - `send_to_peer(peer_id, packet) -> Result<(), NetworkError>`
+     - 路由策略：内部协议消息（`msg_type < USER_MESSAGE_START`）始终通过控制通道发送；用户消息优先通过数据通道发送，若数据通道不可用则回退到控制通道
    - `broadcast(packet, exclude: Option<&[PeerId]>) -> Vec<(PeerId, NetworkError)>` 返回失败列表
+     - 路由策略同上：内部消息走控制通道，用户消息优先数据通道、回退控制通道
    - 发送队列满时返回 `NetworkError::SendQueueFull`
 7. **其他公开辅助方法**（供测试或上层逻辑使用）：
    - `get_connected_peer_ids() -> Vec<PeerId>`
@@ -221,18 +227,24 @@ impl Encoder<RawPacket> for PacketCodec {
    - `get_peer_addr(peer_id) -> Option<SocketAddr>`
      这组方法主要用于 `lib.rs` 的消息处理和测试验证。
 
-8. **DisconnectPeer**：
+8. **数据通道管理**：
+   - 数据通道延迟启动使用命名常量 `const DATA_CHANNEL_OPEN_DELAY: Duration = Duration::from_millis(50)`，确保双方完成控制通道握手后再建立数据通道
+   - `open_data_channel(peer_id) -> Result<(), NetworkError>`：向目标 peer 发起新的 TCP 连接作为数据通道，连接建立后发送 `DataChannelHandshake { peer_id }` 进行身份验证。**仅 peer_id 字典序较小的一方发起数据通道**，避免双方同时发起导致的竞争条件
+   - `handle_incoming_data_channel_framed(framed, peer_id)`：处理入站数据通道连接，验证 `DataChannelHandshake` 后回复 `DataChannelHandshakeAck { peer_id, success }`
+   - `register_data_channel(peer_id, data_tx, data_cancel)`：将已建立的数据通道注册到 `PeerConnection`，后续用户消息将优先通过此通道发送
+
+9. **DisconnectPeer**：
    - 向目标 peer 发送 `PeerLeave` 消息（最尽力，发送失败时只记录 debug 日志，不报错）
    - 设置 `conn.info.should_reconnect = false`
    - 取消 per-peer `CancellationToken`（停止读/写 task）
    - 从 connections map 中移除
    - 注意：membership 的移除由调用方负责（FFI 的 `DisconnectPeer` 另行调用 `membership.remove_peer()`）
 
-9. **优雅关闭（顺序关键）**：
-   1. 向所有连接发送 `PeerLeave` 消息（此时 write task 仍在运行）
-   2. 等待发送队列清空（最多 1s）
-   3. 触发 `shutdown_token.cancel()`（通知所有 task 退出）
-   4. 设置所有 peer 的 `should_reconnect = false`，清空 connections map
+10. **优雅关闭（顺序关键）**：
+    - 向所有连接发送 `PeerLeave` 消息（此时 write task 仍在运行）
+    - 等待发送队列清空（最多 1s）
+    - 触发 `shutdown_token.cancel()`（通知所有 task 退出）
+    - 设置所有 peer 的 `should_reconnect = false`，清空 connections map
 
 **线程模型**：每个连接 spawn 两个 tokio task：
 
@@ -257,7 +269,7 @@ impl Encoder<RawPacket> for PacketCodec {
 - PeerListSync 触发的连接遵循字典序去重规则
 - **TCP Keep-alive 在 Windows 和 macOS 上均不报错**（Windows 跳过 retries 设置）
 - **TCP Keep-alive 三个参数均可通过 `NetworkConfig` 配置**（`keepalive_time_secs`、`keepalive_interval_secs`、`keepalive_retries`）
-- **TCP_NODELAY 可通过 `NetworkConfig::tcp_nodelay` 配置化启用**（默认禁用，即 Nagle 启用）
+- **TCP_NODELAY 可通过 `NetworkConfig::tcp_nodelay` 配置化启用**（默认启用，即 Nagle 禁用）
 
 ## 实现映射（关键函数/方法）
 

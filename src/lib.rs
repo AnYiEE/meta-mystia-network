@@ -281,8 +281,15 @@ async fn handle_message(peer_id: &PeerId, packet: RawPacket, ctx: &MessageHandle
                 session_id: _,
             } => {
                 let pid = PeerId::new(&remote_id);
-                if let Some(addr) = transport.get_peer_addr(&pid) {
-                    let _ = membership.add_peer(pid, addr);
+                if let Some(addr) = transport.get_peer_addr(&pid)
+                    && membership.add_peer(pid.clone(), addr).is_err()
+                {
+                    // Peer already tracked (e.g. reconnected after a
+                    // timeout marked them Disconnected). Restore
+                    // Connected status and refresh last-seen so that
+                    // timeout/quorum logic stays consistent.
+                    membership.update_status(&pid, PeerStatus::Connected);
+                    membership.update_last_seen(&pid);
                 }
             }
             InternalMessage::HandshakeAck {
@@ -293,8 +300,11 @@ async fn handle_message(peer_id: &PeerId, packet: RawPacket, ctx: &MessageHandle
             } => {
                 if success {
                     let pid = PeerId::new(&remote_id);
-                    if let Some(addr) = transport.get_peer_addr(&pid) {
-                        let _ = membership.add_peer(pid, addr);
+                    if let Some(addr) = transport.get_peer_addr(&pid)
+                        && membership.add_peer(pid.clone(), addr).is_err()
+                    {
+                        membership.update_status(&pid, PeerStatus::Connected);
+                        membership.update_last_seen(&pid);
                     }
                 }
             }
@@ -423,6 +433,11 @@ async fn handle_message(peer_id: &PeerId, packet: RawPacket, ctx: &MessageHandle
                     callback.send_received(&from, data, user_packet.msg_type, user_packet.flags);
                 }
             }
+            // Data-channel handshake messages are fully handled at the
+            // transport layer. If one leaks into the message handler
+            // (e.g. during a race), just ignore it.
+            InternalMessage::DataChannelHandshake { .. }
+            | InternalMessage::DataChannelHandshakeAck { .. } => {}
         }
     } else {
         let data = match decode_payload(&packet) {
@@ -468,10 +483,16 @@ fn spawn_periodic_tasks(
                         }
 
                         let timed_out = membership.check_timeouts();
-                        for pid in timed_out {
+                        for pid in &timed_out {
                             tracing::warn!(peer = %pid, "peer timed out");
-                            membership.update_status(&pid, PeerStatus::Disconnected);
-                            callback.send_peer_status(&pid, PeerStatus::Disconnected.as_i32());
+                            membership.update_status(pid, PeerStatus::Disconnected);
+                            callback.send_peer_status(pid, PeerStatus::Disconnected.as_i32());
+                            // Force-disconnect the underlying TCP
+                            // connection to avoid ghost connections
+                            // lingering through tunneled networks.
+                            if let Err(e) = transport.disconnect_peer(pid) {
+                                tracing::debug!(peer = %pid, error = %e, "cleanup disconnect on timeout");
+                            }
                         }
                     }
                 }

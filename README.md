@@ -6,7 +6,7 @@
 
 ## 🌟 核心特性
 
-- **TCP 全双工传输**，支持自动透明 LZ4 压缩
+- **TCP 双通道传输**（控制通道 + 数据通道），用户消息自动走数据通道，控制协议走控制通道；支持自动透明 LZ4 压缩
 - **mDNS 局域网发现**，不可用时可直接指定 TCP 地址连接
 - **会话隔离**：同一网段内通过 `session_id` 区分多个独立网络
 - **Raft 选主**，适合多节点互联
@@ -114,6 +114,7 @@ MetaMystiaNetwork.ShutdownNetwork();
 | `InitializeNetworkWithConfig(peerId, sessionId, cfg)` | 使用自定义配置初始化                 | `cfg` 不能为空指针；结构体大小须为 40 字节且字段顺序与 Rust 端对齐        |
 | `ShutdownNetwork()`                                   | 关闭并清理所有资源                   | 未初始化时调用返回 `NotInitialized`；关闭后可重新调用 `InitializeNetwork` |
 | `IsNetworkInitialized()`                              | 已初始化返回 `1`，否则返回 `0`       |                                                                           |
+| `IsMdnsActive()`                                      | mDNS 已启动返回 `1`，否则返回 `0`    |                                                                           |
 | `GetLastErrorCode()` / `GetLastErrorMessage()`        | 获取最近一次调用失败的错误码和描述   | 消息字符串有效期至下一次字符串返回前                                      |
 
 ### 连接管理
@@ -196,7 +197,7 @@ struct NetworkConfigFFI {
     uint8_t  centralized_auto_forward;     // offset 34, 默认 1
     uint8_t  auto_election_enabled;        // offset 35, 默认 1
     uint8_t  manual_override_recovery;     // offset 36, 默认 0（Hold=0, AutoElect=1）
-    uint8_t  tcp_nodelay;                  // offset 37, 默认 0（0=启用Nagle, 1=禁用Nagle）
+    uint8_t  tcp_nodelay;                  // offset 37, 默认 1（0=启用Nagle, 1=禁用Nagle）
     uint8_t  _padding[2];                  // offset 38, 显式填充，保持 4 字节对齐
 };
 ```

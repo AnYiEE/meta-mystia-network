@@ -634,10 +634,10 @@ public class NetworkTests
   // --- 24b. tcp_nodelay default value -----------------------------------
 
   [Fact]
-  public void ConfigDefaultTcpNoDelayIsZero()
+  public void ConfigDefaultTcpNoDelayIsOne()
   {
     var cfg = NetworkConfigFFI.Default();
-    Assert.Equal((byte)0, cfg.tcp_nodelay);
+    Assert.Equal((byte)1, cfg.tcp_nodelay);
   }
 
   // --- 24c. Init with tcp_nodelay = 1 succeeds --------------------------

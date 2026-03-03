@@ -81,6 +81,7 @@ static LAST_RETURNED_STRING: Mutex<Option<CString>> = Mutex::new(None);
 | `InitializeNetworkWithConfig` | `(..., config: *const NetworkConfigFFI) -> i32`                                                               | 自定义配置（含 validate）                                                                                      |
 | `ShutdownNetwork`             | `() -> i32`                                                                                                   | 优雅关闭                                                                                                       |
 | `IsNetworkInitialized`        | `() -> u8`                                                                                                    |                                                                                                                |
+| `IsMdnsActive`                | `() -> u8`                                                                                                    | mDNS 已启动返回 1，否则 0                                                                                      |
 | `GetLastErrorCode`            | `() -> i32`                                                                                                   |                                                                                                                |
 | `GetLastErrorMessage`         | `() -> *const c_char`                                                                                         |                                                                                                                |
 | `ConnectToPeer`               | `(addr: *const c_char) -> i32`                                                                                | 异步，结果通过回调；握手超时/失败会以 `ConnectionFailed` 形式返回；已连接的 peer 返回 `ALREADY_CONNECTED(-14)` |
@@ -191,21 +192,23 @@ fn return_string(s: String) -> *const c_char {
 
 **消息分发表**（`spawn_message_handler`）：
 
-| msg_type             | 处理方               | 动作                                                  |
-| -------------------- | -------------------- | ----------------------------------------------------- |
-| Handshake（转发）    | handler → membership | Transport 验证后转发；调 `add_peer` + 触发 PeerJoined |
-| HandshakeAck（转发） | handler → membership | 主动方收到 success=true 时同上                        |
-| PeerLeave            | membership           | 移除 peer，触发 PeerLeft                              |
-| PeerListSync         | handler              | 向未知 peer 发起连接（字典序去重）                    |
-| Ping                 | handler              | 回复 Pong                                             |
-| Pong                 | membership           | 更新 last_seen + RTT                                  |
-| Heartbeat            | leader_election      | 重置选举超时                                          |
-| HeartbeatResponse    | leader_election      | 确认 Follower 存活                                    |
-| RequestVote          | leader_election      | 返回 VoteResponse                                     |
-| VoteResponse         | leader_election      | 统计票数                                              |
-| LeaderAssign         | leader_election      | 手动覆盖                                              |
-| ForwardedUserData    | session_router       | 转发或触发 ReceiveCallback                            |
-| ≥ USER_MESSAGE_START | callback             | 触发 ReceiveCallback                                  |
+| msg_type                | 处理方               | 动作                                                  |
+| ----------------------- | -------------------- | ----------------------------------------------------- |
+| Handshake（转发）       | handler → membership | Transport 验证后转发；调 `add_peer` + 触发 PeerJoined |
+| HandshakeAck（转发）    | handler → membership | 主动方收到 success=true 时同上                        |
+| PeerLeave               | membership           | 移除 peer，触发 PeerLeft                              |
+| PeerListSync            | handler              | 向未知 peer 发起连接（字典序去重）                    |
+| Ping                    | handler              | 回复 Pong                                             |
+| Pong                    | membership           | 更新 last_seen + RTT                                  |
+| Heartbeat               | leader_election      | 重置选举超时                                          |
+| HeartbeatResponse       | leader_election      | 确认 Follower 存活                                    |
+| RequestVote             | leader_election      | 返回 VoteResponse                                     |
+| VoteResponse            | leader_election      | 统计票数                                              |
+| LeaderAssign            | leader_election      | 手动覆盖                                              |
+| ForwardedUserData       | session_router       | 转发或触发 ReceiveCallback                            |
+| DataChannelHandshake    | —                    | Transport 层内部处理，消息处理器忽略                  |
+| DataChannelHandshakeAck | —                    | Transport 层内部处理，消息处理器忽略                  |
+| ≥ USER_MESSAGE_START    | callback             | 触发 ReceiveCallback                                  |
 
 **周期性 task**（各自独立 `tokio::spawn`，共 3 个）：
 

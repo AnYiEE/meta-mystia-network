@@ -15,7 +15,7 @@
 添加运行时依赖：
 
 - `tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }` — 异步 TCP IO + 定时器
-- `tokio-util = { version = "0.7", features = ["codec", "sync"] }` — 编解码框架（用于 `Framed`）与 `CancellationToken`。注意：crate 名称为 `tokio-util`，在代码中以 `tokio_util` 命名空间引用；本项目使用自定义 `PacketCodec` 实现粘包/分帧。
+- `tokio-util = { version = "0.7", features = ["codec"] }` — 编解码框架（用于 `Framed`）与 `CancellationToken`。注意：crate 名称为 `tokio-util`，在代码中以 `tokio_util` 命名空间引用；本项目使用自定义 `PacketCodec` 实现粘包/分帧。
 - `bytes = "1"` — PacketBuffer 使用 BytesMut
 - `futures-util = { version = "0.3", features = ["sink"] }` — `SinkExt`/`StreamExt` 用于 Framed 读写
 - `hostname = "0.4"` — mDNS 服务注册时获取本机主机名
@@ -45,14 +45,16 @@ default = []
 logging = ["dep:tracing-subscriber"]
 
 [profile.release]
+debug = true
 codegen-units = 1
+incremental = true
 lto = true
-opt-level = "z"
-panic = "abort"
-strip = "symbols"
+opt-level = "s"
+split-debuginfo = "packed"
+strip = true
 ```
 
-> `cdylib` 生成 C 兼容动态库（Windows `.dll` / macOS `.dylib`）。不要同时加 `rlib`，否则会影响符号导出和体积。`panic = "abort"` 与 `catch_unwind` 在 Release 下配合使用时，uncaught panic 直接终止进程，已被 FFI 层 `catch_unwind` 拦截处理。
+> `cdylib` 生成 C 兼容动态库（Windows `.dll` / macOS `.dylib`）。不要同时加 `rlib`，否则会影响符号导出和体积。FFI 层的每个导出函数内部使用 `catch_unwind` 拦截 panic，防止其跨越 C 语言边界。
 
 ### 2. `src/config.rs` — 配置与常量
 
@@ -110,7 +112,7 @@ pub struct NetworkConfig {
     pub auto_election_enabled: bool,
     /// 手动指定 Leader 掉线后的恢复策略，默认 Hold
     pub manual_override_recovery: ManualOverrideRecovery,
-    /// 是否禁用 Nagle 算法（TCP_NODELAY），默认 false
+    /// 是否禁用 Nagle 算法（TCP_NODELAY），默认 true
     pub tcp_nodelay: bool,
 }
 
@@ -135,7 +137,7 @@ impl Default for NetworkConfig {
             centralized_auto_forward: true,
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
-            tcp_nodelay: false,
+            tcp_nodelay: true,
         }
     }
 }
@@ -194,7 +196,7 @@ impl NetworkConfig {
 **InternalMessage 枚举（完整）：**
 
 ```rust
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum InternalMessage {
     // === 连接管理 (0x01–0x0F) ===
     Handshake {
@@ -256,6 +258,15 @@ pub enum InternalMessage {
         original_flags: u8,
         payload: Vec<u8>,
     },
+
+    // === 数据通道 (0x40–0x4F) ===
+    DataChannelHandshake {
+        peer_id: String,
+    },
+    DataChannelHandshakeAck {
+        peer_id: String,
+        success: bool,
+    },
 }
 
 /// msg_type 常量
@@ -272,8 +283,26 @@ pub mod msg_types {
     pub const VOTE_RESPONSE: u16 = 0x0021;
     pub const LEADER_ASSIGN: u16 = 0x0022;
     pub const FORWARDED_USER_DATA: u16 = 0x0030;
+    pub const DATA_CHANNEL_HANDSHAKE: u16 = 0x0040;
+    pub const DATA_CHANNEL_HANDSHAKE_ACK: u16 = 0x0041;
     /// 用户消息起始值
     pub const USER_MESSAGE_START: u16 = 0x0100;
+
+    /// 返回所有内部 msg_type 常量（仅测试可用）
+    #[cfg(test)]
+    pub const fn all() -> [u16; 14] { /* 所有常量数组 */ }
+}
+
+impl InternalMessage {
+    /// 返回此消息对应的 `msg_type` 线路码。
+    /// 这是枚举变体与 `msg_types` 常量之间的规范映射，
+    /// 由 `encode_internal` 用于填充 `RawPacket` 头部。
+    pub fn msg_type(&self) -> u16 {
+        match self {
+            Self::Handshake { .. } => msg_types::HANDSHAKE,
+            // ... 每个变体对应一个 msg_types 常量
+        }
+    }
 }
 ```
 
@@ -340,7 +369,7 @@ impl NetworkError {
 ## Verification
 
 - `cargo check` 通过编译
-- 所有类型实现所需的 derive trait（`Serialize`, `Deserialize`, `Debug`, `Clone` 等）
+- 所有类型实现所需的 derive trait（`Serialize`, `Deserialize`, `Debug`, `Clone`, `PartialEq` 等）
 - `NetworkError` 到错误码的映射覆盖所有变体（含 `HandshakeTimeout`、`AlreadyConnected`）
 - `error_codes` 定义在 `error.rs` 中，无循环依赖
 - `NetworkConfig::default()` 各字段值合理
