@@ -22,6 +22,7 @@ public class NetworkTests
   static LeaderChangedCallback? _onLeaderChanged;
   static PeerStatusCallback? _onPeerStatus;
   static ConnectionResultCallback? _onConn;
+  static ReconnectCallback? _onReconnect;
   static readonly ConcurrentQueue<NetworkEvent> _queue = new();
 
   /// Best-effort teardown between tests: ignore return code so that
@@ -580,7 +581,8 @@ public class NetworkTests
     // 35  auto_election_enabled        u8  → 1
     // 36  manual_override_recovery     u8  → 1
     // 37  tcp_nodelay                  u8  → 1
-    // 38  [2 bytes explicit padding]
+    // 38  auto_reconnect_enabled       u8  → 1
+    // 39  reconnect_max_retries        u8  → 1
     // total = 40 bytes
     //
     // C# LayoutKind.Sequential obeys the same rules and also produces 40 bytes.
@@ -681,6 +683,96 @@ public class NetworkTests
         MetaMystiaNetwork.InitializeNetworkWithConfig("ka_peer", "session", ref cfg));
 
     MetaMystiaNetwork.Check(MetaMystiaNetwork.ShutdownNetwork());
+  }
+
+  // --- 24f. auto_reconnect_enabled default value -----------------------
+
+  [Fact]
+  public void ConfigDefaultAutoReconnectEnabledIsOne()
+  {
+    var cfg = NetworkConfigFFI.Default();
+    Assert.Equal((byte)1, cfg.auto_reconnect_enabled);
+  }
+
+  // --- 24g. reconnect_max_retries default value ------------------------
+
+  [Fact]
+  public void ConfigDefaultReconnectMaxRetriesIsZero()
+  {
+    var cfg = NetworkConfigFFI.Default();
+    Assert.Equal((byte)0, cfg.reconnect_max_retries);
+  }
+
+  // --- 24h. Init with auto_reconnect_enabled = 0 succeeds --------------
+
+  [Fact]
+  public void ConfigWithAutoReconnectDisabled()
+  {
+    EnsureShutdown();
+
+    var cfg = NetworkConfigFFI.Default();
+    cfg.auto_reconnect_enabled = 0;
+    MetaMystiaNetwork.Check(
+        MetaMystiaNetwork.InitializeNetworkWithConfig("ar_peer", "session", ref cfg));
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.ShutdownNetwork());
+  }
+
+  // --- 24i. SetAutoReconnect / IsAutoReconnectEnabled round-trip --------
+
+  [Fact]
+  public void AutoReconnectToggle()
+  {
+    EnsureShutdown();
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.InitializeNetwork("ar_toggle", "session"));
+
+    // Default: enabled (1)
+    Assert.Equal((byte)1, MetaMystiaNetwork.IsAutoReconnectEnabled());
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.SetAutoReconnect(0));
+    Assert.Equal((byte)0, MetaMystiaNetwork.IsAutoReconnectEnabled());
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.SetAutoReconnect(1));
+    Assert.Equal((byte)1, MetaMystiaNetwork.IsAutoReconnectEnabled());
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.ShutdownNetwork());
+  }
+
+  // --- 24j. RegisterReconnectCallback succeeds after init ---------------
+
+  [Fact]
+  public void RegisterReconnectCallbackAfterInit()
+  {
+    EnsureShutdown();
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.InitializeNetwork("rc_peer", "session"));
+
+    _onReconnect = (_, _) => { };
+    Assert.Equal(NetErrorCode.OK, MetaMystiaNetwork.RegisterReconnectCallback(_onReconnect));
+
+    MetaMystiaNetwork.Check(MetaMystiaNetwork.ShutdownNetwork());
+  }
+
+  // --- 24k. RegisterReconnectCallback before init returns NotInitialized
+
+  [Fact]
+  public void RegisterReconnectCallbackBeforeInitReturnNotInitialized()
+  {
+    EnsureShutdown();
+
+    _onReconnect = (_, _) => { };
+    Assert.Equal(NetErrorCode.NotInitialized, MetaMystiaNetwork.RegisterReconnectCallback(_onReconnect));
+  }
+
+  // --- 24l. ReconnectStatus enum values --------------------------------
+
+  [Fact]
+  public void ReconnectStatusEnumValues()
+  {
+    Assert.Equal((byte)0, (byte)ReconnectStatus.Disconnected);
+    Assert.Equal((byte)1, (byte)ReconnectStatus.Succeeded);
+    Assert.Equal((byte)2, (byte)ReconnectStatus.Failed);
   }
 
   // --- 25. E2E: two-process multi-node connect and exchange messages ---

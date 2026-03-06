@@ -258,6 +258,7 @@ impl DiscoveryManager {
 mod tests {
     use super::*;
 
+    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use crate::config::NetworkConfig;
@@ -269,10 +270,12 @@ mod tests {
 
     async fn make_transport(peer_id: &str) -> Arc<TransportManager> {
         let token = CancellationToken::new();
+        let (reconnect_event_tx, _reconnect_event_rx) = mpsc::channel(16);
         let (transport, _rx) = TransportManager::new(
             PeerId::new(peer_id),
             "test_session".to_string(),
             NetworkConfig::default(),
+            reconnect_event_tx,
             token,
         )
         .await

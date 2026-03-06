@@ -111,6 +111,15 @@ pub struct NetworkConfig {
     /// recommended to avoid stacking extra latency on top of the
     /// tunnel's own buffering.
     pub tcp_nodelay: bool,
+    /// if `true`, automatically attempt to reconnect to peers after
+    /// the connection is lost. When `false`, no automatic reconnection
+    /// is attempted; the application must call `ConnectToPeer` again
+    /// manually. Default: `true`.
+    pub auto_reconnect_enabled: bool,
+    /// maximum number of automatic reconnection attempts before giving
+    /// up. `0` means unlimited (keep retrying until success or
+    /// shutdown). Default: `0`.
+    pub reconnect_max_retries: u8,
 }
 
 impl Default for NetworkConfig {
@@ -135,6 +144,8 @@ impl Default for NetworkConfig {
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
             tcp_nodelay: true,
+            auto_reconnect_enabled: true,
+            reconnect_max_retries: 0,
         }
     }
 }
@@ -264,6 +275,24 @@ mod tests {
         assert!(
             cfg.tcp_nodelay,
             "tcp_nodelay should default to true (Nagle disabled)"
+        );
+    }
+
+    #[test]
+    fn test_auto_reconnect_enabled_default() {
+        let cfg = NetworkConfig::default();
+        assert!(
+            cfg.auto_reconnect_enabled,
+            "auto_reconnect_enabled should default to true"
+        );
+    }
+
+    #[test]
+    fn test_reconnect_max_retries_default() {
+        let cfg = NetworkConfig::default();
+        assert_eq!(
+            cfg.reconnect_max_retries, 0,
+            "reconnect_max_retries should default to 0 (unlimited)"
         );
     }
 }

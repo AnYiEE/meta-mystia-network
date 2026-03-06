@@ -59,6 +59,11 @@
 | `test_get_connected_peers`                                    | `get_connected_peers` 只返回 Connected 状态的 peer                     |
 | `test_reconnect_exponential_backoff`                          | 意外断线后自动重连 + 退避                                              |
 | `test_disconnect_no_reconnect`                                | DisconnectPeer 后不触发自动重连                                        |
+| `test_auto_reconnect_enabled_default`                         | `auto_reconnect_enabled` 默认为 true                                   |
+| `test_reconnect_max_retries_default`                          | `reconnect_max_retries` 默认为 0（无限）                               |
+| `test_auto_reconnect_toggle`                                  | `set_auto_reconnect` / `is_auto_reconnect_enabled` 往返切换            |
+| `test_auto_reconnect_config_disabled`                         | 配置 `auto_reconnect_enabled=false` 时初始状态为禁用                   |
+| `test_reconnect_max_retries_config`                           | 配置 `reconnect_max_retries` 值被正确接受                              |
 | **选举**                                                      |                                                                        |
 | `test_initial_state`                                          | LeaderElection 初始状态（Follower, term=0, 无 leader）                 |
 | `test_start_election_single_node`                             | 单节点自动选举立即成为 Leader                                          |

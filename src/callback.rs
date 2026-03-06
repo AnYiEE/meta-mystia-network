@@ -18,6 +18,7 @@ pub type ConnectionResultCallback = unsafe extern "C" fn(*const c_char, u8, i32)
 pub type LeaderChangedCallback = unsafe extern "C" fn(*const c_char);
 pub type PeerStatusCallback = unsafe extern "C" fn(*const c_char, i32);
 pub type ReceiveCallback = unsafe extern "C" fn(*const c_char, *const u8, i32, u16, u8);
+pub type ReconnectCallback = unsafe extern "C" fn(*const c_char, u8);
 
 /// Internal events that can be emitted by the Rust code and
 /// forwarded to the registered callbacks.
@@ -44,6 +45,13 @@ pub enum CallbackEvent {
         msg_type: u16,
         flags: u8,
     },
+    Reconnect {
+        peer_id: String,
+        /// 0 = disconnected (reconnection starting),
+        /// 1 = reconnect succeeded,
+        /// 2 = reconnect failed (retries exhausted)
+        status: u8,
+    },
 }
 
 /// Manages the lifecycle and invocation of callbacks that are
@@ -63,6 +71,8 @@ pub struct CallbackManager {
     peer_status_callback: Arc<Mutex<Option<PeerStatusCallback>>>,
     /// callback for received messages
     receive_callback: Arc<Mutex<Option<ReceiveCallback>>>,
+    /// callback for reconnection events
+    reconnect_callback: Arc<Mutex<Option<ReconnectCallback>>>,
 
     /// handle of the thread running `callback_loop`
     callback_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -85,12 +95,14 @@ impl CallbackManager {
         let peer_status_callback: Arc<Mutex<Option<PeerStatusCallback>>> =
             Arc::new(Mutex::new(None));
         let receive_callback: Arc<Mutex<Option<ReceiveCallback>>> = Arc::new(Mutex::new(None));
+        let reconnect_callback: Arc<Mutex<Option<ReconnectCallback>>> = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let thread_connection_result = Arc::clone(&connection_result_callback);
         let thread_leader_changed = Arc::clone(&leader_changed_callback);
         let thread_peer_status = Arc::clone(&peer_status_callback);
         let thread_receive = Arc::clone(&receive_callback);
+        let thread_reconnect = Arc::clone(&reconnect_callback);
         let thread_shutdown = Arc::clone(&shutdown);
 
         let handle = std::thread::spawn(move || {
@@ -100,6 +112,7 @@ impl CallbackManager {
                 thread_leader_changed,
                 thread_peer_status,
                 thread_receive,
+                thread_reconnect,
                 thread_shutdown,
             );
         });
@@ -109,6 +122,7 @@ impl CallbackManager {
             leader_changed_callback,
             peer_status_callback,
             receive_callback,
+            reconnect_callback,
             callback_thread: Mutex::new(Some(handle)),
             event_tx: Mutex::new(Some(event_tx)),
             shutdown,
@@ -124,6 +138,7 @@ impl CallbackManager {
         leader_changed_callback: Arc<Mutex<Option<LeaderChangedCallback>>>,
         peer_status_callback: Arc<Mutex<Option<PeerStatusCallback>>>,
         receive_callback: Arc<Mutex<Option<ReceiveCallback>>>,
+        reconnect_callback: Arc<Mutex<Option<ReconnectCallback>>>,
         shutdown: Arc<AtomicBool>,
     ) {
         while !shutdown.load(Ordering::Relaxed) {
@@ -135,6 +150,7 @@ impl CallbackManager {
                         &leader_changed_callback,
                         &peer_status_callback,
                         &receive_callback,
+                        &reconnect_callback,
                     );
                 }
                 None => break, // channel closed
@@ -152,6 +168,7 @@ impl CallbackManager {
         leader_changed_callback: &Arc<Mutex<Option<LeaderChangedCallback>>>,
         peer_status_callback: &Arc<Mutex<Option<PeerStatusCallback>>>,
         receive_callback: &Arc<Mutex<Option<ReceiveCallback>>>,
+        reconnect_callback: &Arc<Mutex<Option<ReconnectCallback>>>,
     ) {
         match event {
             CallbackEvent::ConnectionResult {
@@ -210,10 +227,18 @@ impl CallbackManager {
                     }
                 }
             }
+            CallbackEvent::Reconnect { peer_id, status } => {
+                let cb = *reconnect_callback.lock();
+                if let Some(cb) = cb
+                    && let Ok(c_peer) = CString::new(peer_id.as_str())
+                {
+                    unsafe {
+                        cb(c_peer.as_ptr(), *status);
+                    }
+                }
+            }
         }
     }
-
-    // --- helper methods used by other modules ----------------------------
 
     /// Try to enqueue an event; on full queue we drop and log.
     pub fn send_event(&self, event: CallbackEvent) {
@@ -259,6 +284,17 @@ impl CallbackManager {
         });
     }
 
+    /// Helper method to send a reconnection lifecycle event.
+    ///
+    /// Status values: `0` = disconnected (reconnection starting),
+    /// `1` = reconnect succeeded, `2` = reconnect failed (retries exhausted).
+    pub fn send_reconnect(&self, peer_id: &PeerId, status: u8) {
+        self.send_event(CallbackEvent::Reconnect {
+            peer_id: peer_id.as_str().to_owned(),
+            status,
+        });
+    }
+
     // --- registration API ------------------------------------------------
 
     /// Install or clear the connection result callback.
@@ -279,6 +315,11 @@ impl CallbackManager {
     /// Install or clear the receive callback.
     pub fn register_receive_callback(&self, cb: Option<ReceiveCallback>) {
         *self.receive_callback.lock() = cb;
+    }
+
+    /// Install or clear the reconnect callback.
+    pub fn register_reconnect_callback(&self, cb: Option<ReconnectCallback>) {
+        *self.reconnect_callback.lock() = cb;
     }
 
     // --- shutdown helpers ------------------------------------------------

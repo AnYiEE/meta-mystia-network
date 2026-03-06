@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 use crate::NetworkState;
 use crate::callback::{
     ConnectionResultCallback, LeaderChangedCallback, PeerStatusCallback, ReceiveCallback,
+    ReconnectCallback,
 };
 use crate::config::{ManualOverrideRecovery, NetworkConfig};
 use crate::error::NetworkError;
@@ -110,7 +111,8 @@ where
 /// offset 35  auto_election_enabled        u8   (1 B)
 /// offset 36  manual_override_recovery     u8   (1 B)
 /// offset 37  tcp_nodelay                  u8   (1 B)
-/// offset 38  [2 B explicit padding]
+/// offset 38  auto_reconnect_enabled       u8   (1 B)
+/// offset 39  reconnect_max_retries        u8   (1 B)
 /// sizeof = 40
 /// ```
 #[repr(C)]
@@ -148,8 +150,11 @@ pub struct NetworkConfigFFI {
     // TCP_NODELAY toggle (0 = Nagle enabled, 1 = Nagle disabled)
     pub tcp_nodelay: u8,
 
-    // explicit padding to maintain 4-byte alignment
-    pub(crate) _padding: [u8; 2],
+    // auto-reconnect toggle (0 = disabled, 1 = enabled)
+    pub auto_reconnect_enabled: u8,
+
+    // maximum reconnect retries (0 = unlimited)
+    pub reconnect_max_retries: u8,
 }
 
 impl From<&NetworkConfigFFI> for NetworkConfig {
@@ -174,6 +179,8 @@ impl From<&NetworkConfigFFI> for NetworkConfig {
             auto_election_enabled: ffi.auto_election_enabled != 0,
             manual_override_recovery: ManualOverrideRecovery::from_u8(ffi.manual_override_recovery),
             tcp_nodelay: ffi.tcp_nodelay != 0,
+            auto_reconnect_enabled: ffi.auto_reconnect_enabled != 0,
+            reconnect_max_retries: ffi.reconnect_max_retries,
         }
     }
 }
@@ -1042,6 +1049,59 @@ pub extern "C" fn RegisterConnectionResultCallback(
         );
         error_codes::INTERNAL_ERROR
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegisterReconnectCallback(callback: Option<ReconnectCallback>) -> i32 {
+    catch_unwind(|| {
+        let result = with_network(|state| {
+            state.callback.register_reconnect_callback(callback);
+            Ok(())
+        });
+        match result {
+            Ok(()) => error_codes::OK,
+            Err(e) => {
+                set_network_error(&e);
+                e.error_code()
+            }
+        }
+    })
+    .unwrap_or_else(|_| {
+        set_error(
+            error_codes::INTERNAL_ERROR,
+            "panic in RegisterReconnectCallback",
+        );
+        error_codes::INTERNAL_ERROR
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetAutoReconnect(enable: u8) -> i32 {
+    catch_unwind(|| {
+        let result = with_network(|state| {
+            state.transport.set_auto_reconnect(enable != 0);
+            Ok(())
+        });
+        match result {
+            Ok(()) => error_codes::OK,
+            Err(e) => {
+                set_network_error(&e);
+                e.error_code()
+            }
+        }
+    })
+    .unwrap_or_else(|_| {
+        set_error(error_codes::INTERNAL_ERROR, "panic in SetAutoReconnect");
+        error_codes::INTERNAL_ERROR
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn IsAutoReconnectEnabled() -> u8 {
+    catch_unwind(|| {
+        with_network(|state| Ok(u8::from(state.transport.is_auto_reconnect_enabled()))).unwrap_or(0)
+    })
+    .unwrap_or(0)
 }
 
 // --- utility ------------------------------------------------------------

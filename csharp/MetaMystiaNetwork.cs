@@ -108,6 +108,21 @@ namespace MetaMystiaNetworkBindings
     Handshaking = 3,
   }
 
+  /// <summary>
+  /// Status reported by <see cref="ReconnectCallback"/>.
+  /// </summary>
+  public enum ReconnectStatus : byte
+  {
+    /// <summary>TCP connection lost; reconnect attempts may begin.</summary>
+    Disconnected = 0,
+
+    /// <summary>Reconnection succeeded; the peer is connected again.</summary>
+    Succeeded = 1,
+
+    /// <summary>All reconnection attempts exhausted; giving up.</summary>
+    Failed = 2,
+  }
+
   /// <summary>Discriminates which kind of event is stored in a <see cref="NetworkEvent"/>.</summary>
   public enum NetworkEventType
   {
@@ -122,6 +137,9 @@ namespace MetaMystiaNetworkBindings
 
     /// <summary>An asynchronous <see cref="MetaMystiaNetwork.ConnectToPeer"/> call completed.</summary>
     ConnectionResult,
+
+    /// <summary>A reconnection-related event occurred.</summary>
+    Reconnect,
   }
 
   // --- NetworkEvent ----------------------------------------------------
@@ -173,6 +191,12 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     public int ErrorCode;
 
+    /// <summary>
+    /// Reconnection status.
+    /// Populated for <see cref="NetworkEventType.Reconnect"/> only.
+    /// </summary>
+    public ReconnectStatus ReconnectStatus;
+
     /// <summary>Initializes all fields to their safe defaults.</summary>
     public NetworkEvent() { }
   }
@@ -211,7 +235,8 @@ namespace MetaMystiaNetworkBindings
   ///  offset 35  auto_election_enabled        u8   (1 B)
   ///  offset 36  manual_override_recovery     u8   (1 B)
   ///  offset 37  tcp_nodelay                  u8   (1 B)
-  ///  offset 38  [2 B explicit padding]
+  ///  offset 38  auto_reconnect_enabled       u8   (1 B)
+  ///  offset 39  reconnect_max_retries        u8   (1 B)
   ///  sizeof = 40
   /// </code>
   /// </remarks>
@@ -333,7 +358,18 @@ namespace MetaMystiaNetworkBindings
     /// </summary>
     public byte tcp_nodelay;
 
-    // 2 bytes of explicit trailing padding (maintains 4-byte alignment)
+    /// <summary>
+    /// <c>1</c> = enable automatic reconnection when a peer connection drops
+    /// (default); <c>0</c> = do not reconnect automatically.
+    /// Can be toggled at runtime via <see cref="MetaMystiaNetwork.SetAutoReconnect"/>.
+    /// </summary>
+    public byte auto_reconnect_enabled;
+
+    /// <summary>
+    /// Maximum number of reconnection attempts before giving up.
+    /// <c>0</c> = unlimited (default).
+    /// </summary>
+    public byte reconnect_max_retries;
 
     /// <summary>
     /// Returns a <see cref="NetworkConfigFFI"/> pre-filled with the same defaults
@@ -360,6 +396,8 @@ namespace MetaMystiaNetworkBindings
       auto_election_enabled = 1,
       manual_override_recovery = (byte)ManualOverrideRecovery.Hold,
       tcp_nodelay = 1,
+      auto_reconnect_enabled = 1,
+      reconnect_max_retries = 0,
     };
   }
 
@@ -418,6 +456,15 @@ namespace MetaMystiaNetworkBindings
   /// <param name="errorCode"><see cref="NetErrorCode.OK"/> on success or a negative error code.</param>
   [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
   public delegate void ConnectionResultCallback(IntPtr addr, byte success, int errorCode);
+
+  /// <summary>
+  /// Invoked on a Rust background thread when a reconnection-related event occurs.
+  /// </summary>
+  /// <remarks>See <see cref="ReceiveCallback"/> for threading and lifetime constraints.</remarks>
+  /// <param name="peerId">Pointer to the affected peer's ID string.</param>
+  /// <param name="status"><see cref="ReconnectStatus"/> ordinal: 0 = disconnected, 1 = succeeded, 2 = failed.</param>
+  [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+  public delegate void ReconnectCallback(IntPtr peerId, byte status);
 
   // --- Raw P/Invoke bindings -----------------------------------------------
 
@@ -738,6 +785,30 @@ namespace MetaMystiaNetworkBindings
     [DllImport(DLL, CallingConvention = CC)]
     public static extern int RegisterConnectionResultCallback(ConnectionResultCallback? callback);
 
+    /// <summary>
+    /// Registers the callback invoked on reconnection events (disconnect,
+    /// reconnect success, reconnect exhausted). Pass <c>null</c> to unregister.
+    /// </summary>
+    [DllImport(DLL, CallingConvention = CC)]
+    public static extern int RegisterReconnectCallback(ReconnectCallback? callback);
+
+    #endregion
+
+    #region Auto-reconnect control
+
+    /// <summary>
+    /// Enables (<c>1</c>) or disables (<c>0</c>) automatic reconnection at runtime.
+    /// When disabled, broken connections are not retried.
+    /// </summary>
+    [DllImport(DLL, CallingConvention = CC)]
+    public static extern int SetAutoReconnect(byte enable);
+
+    /// <summary>
+    /// Returns <c>1</c> if automatic reconnection is currently enabled; <c>0</c> otherwise.
+    /// </summary>
+    [DllImport(DLL, CallingConvention = CC)]
+    public static extern byte IsAutoReconnectEnabled();
+
     #endregion
 
     #region Logging
@@ -846,6 +917,7 @@ namespace MetaMystiaNetworkBindings
     private static readonly LeaderChangedCallback s_onLeaderChanged = OnLeaderChangedNative;
     private static readonly PeerStatusCallback s_onPeerStatus = OnPeerStatusNative;
     private static readonly ConnectionResultCallback s_onConnResult = OnConnectionResultNative;
+    private static readonly ReconnectCallback s_onReconnect = OnReconnectNative;
 
     // --- Cross-thread event queue -----------------------------------------
     //    Native callbacks (Rust thread) enqueue; Poll() (caller thread) dequeues.
@@ -898,6 +970,12 @@ namespace MetaMystiaNetworkBindings
     /// Arguments: <c>(targetAddr, succeeded, errorCode)</c>.
     /// </summary>
     public event Action<string, bool, int>? ConnectionResult;
+
+    /// <summary>
+    /// Raised when a reconnection-related event occurs.
+    /// Arguments: <c>(peerId, status)</c>.
+    /// </summary>
+    public event Action<string, ReconnectStatus>? ReconnectEvent;
 
     // --- Properties ------------------------------------------------------
 
@@ -979,6 +1057,9 @@ namespace MetaMystiaNetworkBindings
           case NetworkEventType.ConnectionResult:
             ConnectionResult?.Invoke(ev.PeerId, ev.Success, ev.ErrorCode);
             break;
+          case NetworkEventType.Reconnect:
+            ReconnectEvent?.Invoke(ev.PeerId, ev.ReconnectStatus);
+            break;
         }
       }
     }
@@ -1025,6 +1106,7 @@ namespace MetaMystiaNetworkBindings
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterLeaderChangedCallback(s_onLeaderChanged));
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterPeerStatusCallback(s_onPeerStatus));
       MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterConnectionResultCallback(s_onConnResult));
+      MetaMystiaNetwork.Check(MetaMystiaNetwork.RegisterReconnectCallback(s_onReconnect));
     }
 
     // --- Native callbacks ------------------------------------------------
@@ -1083,6 +1165,19 @@ namespace MetaMystiaNetworkBindings
         PeerId = Marshal.PtrToStringAnsi(addr) ?? string.Empty,
         Success = success != 0,
         ErrorCode = errorCode,
+      });
+    }
+
+#if IL2CPP || ENABLE_IL2CPP
+        [AOT.MonoPInvokeCallback(typeof(ReconnectCallback))]
+#endif
+    private static void OnReconnectNative(IntPtr peerId, byte status)
+    {
+      s_eventQueue.Enqueue(new NetworkEvent
+      {
+        Type = NetworkEventType.Reconnect,
+        PeerId = Marshal.PtrToStringAnsi(peerId) ?? string.Empty,
+        ReconnectStatus = (ReconnectStatus)status,
       });
     }
   }

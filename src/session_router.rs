@@ -290,10 +290,12 @@ mod tests {
     async fn make_router() -> SessionRouter {
         let local = PeerId::new("local");
         let config = NetworkConfig::default();
+        let (reconnect_event_tx, _reconnect_event_rx) = mpsc::channel(16);
         let (transport, _incoming) = TransportManager::new(
             local.clone(),
             "session".into(),
             config,
+            reconnect_event_tx,
             CancellationToken::new(),
         )
         .await

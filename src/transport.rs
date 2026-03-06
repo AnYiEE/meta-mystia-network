@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::{BufMut, BytesMut};
@@ -136,6 +137,10 @@ pub struct TransportManager {
     listener_addr: SocketAddr,
     incoming_tx: mpsc::Sender<(PeerId, RawPacket)>,
 
+    // --- reconnection ----------------------------------------------------
+    reconnect_event_tx: mpsc::Sender<(PeerId, u8)>,
+    auto_reconnect_enabled: AtomicBool,
+
     // --- lifecycle control -----------------------------------------------
     shutdown_token: CancellationToken,
 }
@@ -148,6 +153,7 @@ impl TransportManager {
         local_peer_id: PeerId,
         session_id: String,
         config: NetworkConfig,
+        reconnect_event_tx: mpsc::Sender<(PeerId, u8)>,
         shutdown_token: CancellationToken,
     ) -> Result<(Arc<Self>, mpsc::Receiver<(PeerId, RawPacket)>), NetworkError> {
         let listener = TcpListener::bind("0.0.0.0:0").await?;
@@ -163,6 +169,8 @@ impl TransportManager {
             connections: Arc::new(RwLock::new(HashMap::new())),
             listener_addr,
             incoming_tx,
+            reconnect_event_tx,
+            auto_reconnect_enabled: AtomicBool::new(config.auto_reconnect_enabled),
             shutdown_token: shutdown_token.clone(),
         });
 
@@ -699,7 +707,10 @@ impl TransportManager {
                     if let Some(dc) = conn.data_cancel.take() {
                         dc.cancel();
                     }
-                    let addr = if conn.info.should_reconnect && !mgr.shutdown_token.is_cancelled() {
+                    let addr = if conn.info.should_reconnect
+                        && !mgr.shutdown_token.is_cancelled()
+                        && mgr.auto_reconnect_enabled.load(Ordering::Relaxed)
+                    {
                         Some(conn.info.addr.to_string())
                     } else {
                         None
@@ -712,6 +723,7 @@ impl TransportManager {
             };
 
             if let Some(addr) = reconnect_addr {
+                let _ = mgr.reconnect_event_tx.try_send((read_peer_id.clone(), 0));
                 mgr.spawn_reconnect(read_peer_id, addr);
             }
         });
@@ -742,22 +754,34 @@ impl TransportManager {
 
     /// When a connection is lost but flagged for reconnection, this
     /// method kicks off a background task that attempts to re-establish
-    /// the connection using exponential backoff until success or
-    /// shutdown.
+    /// the connection using exponential backoff until success, shutdown,
+    /// or the configured maximum retry count is reached.
+    ///
+    /// Reconnection lifecycle events are sent through `reconnect_event_tx`:
+    /// `0` = disconnected (sent by caller before this method),
+    /// `1` = reconnect succeeded, `2` = retries exhausted.
     fn spawn_reconnect(self: &Arc<Self>, peer_id: PeerId, addr: String) {
         let mgr = Arc::clone(self);
         let initial_ms = u32::from(self.config.reconnect_initial_ms);
         let max_ms = self.config.reconnect_max_ms;
+        let max_retries = self.config.reconnect_max_retries;
         let shutdown = self.shutdown_token.clone();
 
         tokio::spawn(async move {
             let mut delay_ms = initial_ms;
+            let mut attempts: u8 = 0;
             loop {
                 tracing::info!(peer = %peer_id, delay_ms, "scheduling reconnect");
 
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
                     _ = tokio::time::sleep(Duration::from_millis(delay_ms.into())) => {}
+                }
+
+                if !mgr.auto_reconnect_enabled.load(Ordering::Relaxed) {
+                    tracing::info!(peer = %peer_id, "auto-reconnect disabled at runtime, stopping");
+                    let _ = mgr.reconnect_event_tx.try_send((peer_id.clone(), 2));
+                    break;
                 }
 
                 let result = tokio::select! {
@@ -768,10 +792,20 @@ impl TransportManager {
                 match result {
                     Ok(_) => {
                         tracing::info!(peer = %peer_id, "reconnected successfully");
+                        let _ = mgr.reconnect_event_tx.try_send((peer_id.clone(), 1));
                         break;
                     }
                     Err(e) => {
                         tracing::warn!(peer = %peer_id, error = %e, "reconnect failed");
+                        attempts = attempts.saturating_add(1);
+                        if max_retries > 0 && attempts >= max_retries {
+                            tracing::warn!(
+                                peer = %peer_id, attempts,
+                                "reconnect attempts exhausted"
+                            );
+                            let _ = mgr.reconnect_event_tx.try_send((peer_id.clone(), 2));
+                            break;
+                        }
                         delay_ms = delay_ms.saturating_mul(2).min(max_ms);
                     }
                 }
@@ -1122,6 +1156,17 @@ impl TransportManager {
         }
     }
 
+    /// Enable or disable automatic reconnection globally at runtime.
+    pub fn set_auto_reconnect(&self, enabled: bool) {
+        self.auto_reconnect_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check whether automatic reconnection is currently enabled.
+    pub fn is_auto_reconnect_enabled(&self) -> bool {
+        self.auto_reconnect_enabled.load(Ordering::Relaxed)
+    }
+
     /// Update the stored status of a peer connection (e.g.
     /// Connected/Disconnected).
     pub fn update_peer_status(&self, peer_id: &PeerId, status: PeerStatus) {
@@ -1165,7 +1210,6 @@ impl TransportManager {
         self.connections.read().get(peer_id).map(|c| c.info.addr)
     }
 
-    /// Check whether the data channel is established for a peer.
     #[cfg(test)]
     pub(crate) fn has_data_channel(&self, peer_id: &PeerId) -> bool {
         self.connections
@@ -1190,9 +1234,16 @@ mod tests {
     ) -> (Arc<TransportManager>, mpsc::Receiver<(PeerId, RawPacket)>) {
         let config = NetworkConfig::default();
         let token = CancellationToken::new();
-        TransportManager::new(PeerId::new(peer_id), session_id.into(), config, token)
-            .await
-            .unwrap()
+        let (reconnect_event_tx, _reconnect_event_rx) = mpsc::channel(16);
+        TransportManager::new(
+            PeerId::new(peer_id),
+            session_id.into(),
+            config,
+            reconnect_event_tx,
+            token,
+        )
+        .await
+        .unwrap()
     }
 
     #[test]
@@ -1296,11 +1347,6 @@ mod tests {
         assert!(matches!(result, Err(NetworkError::MessageTooLarge(_))));
     }
 
-    /// Inbound path: when peer_a is already connected to peer_b and
-    /// peer_b opens a second TCP connection to peer_a, the server
-    /// side (peer_a) should detect the duplicate in `receive_handshake`
-    /// and return `AlreadyConnected` — the existing connection is
-    /// kept intact.
     #[tokio::test]
     async fn test_already_connected_inbound() {
         let (tm_a, _rx_a) = make_transport("peer_a", "session").await;
@@ -1327,10 +1373,6 @@ mod tests {
         assert!(tm_b.has_peer(&PeerId::new("peer_a")));
     }
 
-    /// Outbound path: when peer_a connects to peer_b which already
-    /// has peer_a registered, peer_b's `receive_handshake` sends
-    /// `HandshakeAck(success=true, "already_connected")` and the
-    /// caller (`connect_to`) surfaces `AlreadyConnected`.
     #[tokio::test]
     async fn test_already_connected_outbound() {
         let (tm_a, _rx_a) = make_transport("peer_a", "session").await;
@@ -1476,30 +1518,36 @@ mod tests {
 
         // Create 3 nodes with the low limit.
         let token_a = CancellationToken::new();
+        let (reconnect_event_tx_a, _reconnect_event_rx_a) = mpsc::channel(16);
         let (tm_a, mut rx_a) = TransportManager::new(
             PeerId::new("peer_a"),
             "session_dc".into(),
             config,
+            reconnect_event_tx_a,
             token_a.clone(),
         )
         .await
         .unwrap();
 
         let token_b = CancellationToken::new();
+        let (reconnect_event_tx_b, _reconnect_event_rx_b) = mpsc::channel(16);
         let (tm_b, _rx_b) = TransportManager::new(
             PeerId::new("peer_b"),
             "session_dc".into(),
             config,
+            reconnect_event_tx_b,
             token_b.clone(),
         )
         .await
         .unwrap();
 
         let token_c = CancellationToken::new();
+        let (reconnect_event_tx_c, _reconnect_event_rx_c) = mpsc::channel(16);
         let (tm_c, _rx_c) = TransportManager::new(
             PeerId::new("peer_c"),
             "session_dc".into(),
             config,
+            reconnect_event_tx_c,
             token_c.clone(),
         )
         .await
@@ -1564,5 +1612,63 @@ mod tests {
         token_a.cancel();
         token_b.cancel();
         token_c.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_auto_reconnect_toggle() {
+        let (tm, _rx) = make_transport("toggle_peer", "session").await;
+
+        // Default: enabled
+        assert!(tm.is_auto_reconnect_enabled());
+
+        tm.set_auto_reconnect(false);
+        assert!(!tm.is_auto_reconnect_enabled());
+
+        tm.set_auto_reconnect(true);
+        assert!(tm.is_auto_reconnect_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_auto_reconnect_config_disabled() {
+        let config = NetworkConfig {
+            auto_reconnect_enabled: false,
+            ..NetworkConfig::default()
+        };
+        let token = CancellationToken::new();
+        let (reconnect_event_tx, _reconnect_event_rx) = mpsc::channel(16);
+        let (tm, _rx) = TransportManager::new(
+            PeerId::new("no_reconnect"),
+            "session".into(),
+            config,
+            reconnect_event_tx,
+            token,
+        )
+        .await
+        .unwrap();
+
+        assert!(!tm.is_auto_reconnect_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_max_retries_config() {
+        let config = NetworkConfig {
+            reconnect_max_retries: 5,
+            ..NetworkConfig::default()
+        };
+        // Verify the config value is accepted and the transport initializes
+        let token = CancellationToken::new();
+        let (reconnect_event_tx, _reconnect_event_rx) = mpsc::channel(16);
+        let (tm, _rx) = TransportManager::new(
+            PeerId::new("retry_peer"),
+            "session".into(),
+            config,
+            reconnect_event_tx,
+            token,
+        )
+        .await
+        .unwrap();
+
+        // Auto-reconnect should still be enabled by default
+        assert!(tm.is_auto_reconnect_enabled());
     }
 }

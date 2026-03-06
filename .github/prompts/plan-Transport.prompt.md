@@ -87,6 +87,8 @@ impl RawPacket {
   - `config: NetworkConfig`
   - `connections: Arc<RwLock<HashMap<PeerId, PeerConnection>>>`
   - `listener_addr: SocketAddr` — 本地监听地址
+  - `reconnect_event_tx: mpsc::Sender<(PeerId, u8)>` — 重连事件通道（0=断开, 1=成功, 2=失败）
+  - `auto_reconnect_enabled: AtomicBool` — 运行时自动重连开关
   - `shutdown_token: CancellationToken` — 全局关闭信号
 
 **构造函数返回值**（解耦 IO 与逻辑，提升可测试性）：
@@ -97,6 +99,7 @@ impl TransportManager {
         local_peer_id: PeerId,
         session_id: String,
         config: NetworkConfig,
+        reconnect_event_tx: mpsc::Sender<(PeerId, u8)>,
         shutdown_token: CancellationToken,
     ) -> Result<(Arc<Self>, mpsc::Receiver<(PeerId, RawPacket)>), NetworkError> {
         let (incoming_tx, incoming_rx) = mpsc::channel(256); // 汇总所有 peer 的入站消息，容量独立于 per-peer send_queue
@@ -205,10 +208,14 @@ impl Encoder<RawPacket> for PacketCodec {
    - **使用与 mDNS 相同的去重规则**：仅当 `local_peer_id < target_peer_id`（字典序）时主动连接，避免双向同时连接
 
 5. **自动重连**：
-   - 检测到连接断开后，检查 `PeerInfo.should_reconnect`：
-     - `true`（默认，意外断线）：`tokio::spawn` 重连任务
-     - `false`（`DisconnectPeer` 调用后）：不重连
+   - 检测到连接断开后，检查 `PeerInfo.should_reconnect` 且 `auto_reconnect_enabled`：
+     - 两者均为 `true`（默认，意外断线）：发送重连事件（status=0），`tokio::spawn` 重连任务
+     - `should_reconnect = false`（`DisconnectPeer` 调用后）：不重连
+     - `auto_reconnect_enabled = false`：不重连
    - 指数退避：初始 `reconnect_initial_ms`，倍增至 `reconnect_max_ms`
+   - `reconnect_max_retries`（默认 0=无限）：达到最大次数后停止重连并发送失败事件（status=2）
+   - 重连成功时发送事件（status=1）
+   - 运行时可通过 `set_auto_reconnect(bool)` 动态切换；重连循环中若检测到已禁用则立即停止
    - 使用 `CancellationToken` 在 ShutdownNetwork 时中止重连
 
 6. **消息发送接口**：
@@ -270,13 +277,16 @@ impl Encoder<RawPacket> for PacketCodec {
 - **TCP Keep-alive 在 Windows 和 macOS 上均不报错**（Windows 跳过 retries 设置）
 - **TCP Keep-alive 三个参数均可通过 `NetworkConfig` 配置**（`keepalive_time_secs`、`keepalive_interval_secs`、`keepalive_retries`）
 - **TCP_NODELAY 可通过 `NetworkConfig::tcp_nodelay` 配置化启用**（默认启用，即 Nagle 禁用）
+- **自动重连可通过 `NetworkConfig::auto_reconnect_enabled` 配置**（默认启用），运行时可通过 `set_auto_reconnect` 动态切换
+- **重连最大重试次数可通过 `NetworkConfig::reconnect_max_retries` 配置**（默认 0=无限）
+- **重连生命周期事件通过 `reconnect_event_tx` 通道传递**（0=断开, 1=成功, 2=失败）
 
 ## 实现映射（关键函数/方法）
 
 - FFI → Transport：`ConnectToPeer` 调用 `transport.connect_to(addr)`（在 `src/ffi.rs` 中通过 tokio runtime spawn 异步执行）；`DisconnectPeer` 调用 `TransportManager::disconnect_peer`。
 - Transport 暴露的内部方法：`TransportManager::new(...) -> (Arc<Self>, incoming_rx)`, `connect_to(&self, addr: &str)`, `register_connection`, `send_to_peer(&self, peer_id, packet)`, `broadcast(&self, packet, exclude)`, `drain_send_queues(timeout)`, `shutdown()`。
   另外还有若干辅助查询/控制方法用于上层逻辑与测试：
-  `get_connected_peer_ids()`, `has_peer()`, `set_should_reconnect()`, `update_peer_status()`, `update_last_seen()` / `update_rtt()`, `get_peer_rtt()`, `get_peer_status()`, `get_peer_addr()`。
+  `get_connected_peer_ids()`, `has_peer()`, `set_should_reconnect()`, `update_peer_status()`, `update_last_seen()` / `update_rtt()`, `get_peer_rtt()`, `get_peer_status()`, `get_peer_addr()`, `set_auto_reconnect()`, `is_auto_reconnect_enabled()`。
 - PacketCodec 行为：`Decoder` 在成功切出 header 与 payload 后使用 `payload.freeze()` 返回 `Bytes`，`Encoder` 在写入前调用 `dst.reserve(7 + payload.len())`；这与 `messaging.rs` 中 `RawPacket` 的零拷贝设计一致。
 - 握手流程与超时：`config.handshake_timeout_ms` 在 `NetworkConfig` 中定义（默认 5000ms），`receive_handshake`/`receive_handshake_ack` 在 `transport.rs` 中实现；失败返回 `HandshakeTimeout`（FFI 映射到 `CONNECTION_FAILED`）或 `HandshakeFailed`。
 

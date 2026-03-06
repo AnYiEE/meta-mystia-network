@@ -161,6 +161,14 @@ MetaMystiaNetwork.ShutdownNetwork();
 | `RegisterLeaderChangedCallback(cb)`    | 注册 Leader 变更通知回调 |                                                                             |
 | `RegisterPeerStatusCallback(cb)`       | 注册节点状态变更回调     |                                                                             |
 | `RegisterConnectionResultCallback(cb)` | 注册异步连接结果回调     |                                                                             |
+| `RegisterReconnectCallback(cb)`        | 注册重连事件回调         | 状态码：0=断开, 1=重连成功, 2=重连失败                                      |
+
+### 自动重连控制
+
+| 函数                       | 功能                                | 备注     |
+| -------------------------- | ----------------------------------- | -------- |
+| `SetAutoReconnect(enable)` | 启/关自动重连                       | 默认开启 |
+| `IsAutoReconnectEnabled()` | 返回 `1` 表示已启用，`0` 表示已禁用 |          |
 
 ### 工具函数
 
@@ -198,7 +206,8 @@ struct NetworkConfigFFI {
     uint8_t  auto_election_enabled;        // offset 35, 默认 1
     uint8_t  manual_override_recovery;     // offset 36, 默认 0（Hold=0, AutoElect=1）
     uint8_t  tcp_nodelay;                  // offset 37, 默认 1（0=启用Nagle, 1=禁用Nagle）
-    uint8_t  _padding[2];                  // offset 38, 显式填充，保持 4 字节对齐
+    uint8_t  auto_reconnect_enabled;       // offset 38, 默认 1（0=禁用自动重连, 1=启用）
+    uint8_t  reconnect_max_retries;        // offset 39, 默认 0（0=无限重试）
 };
 ```
 
@@ -225,9 +234,13 @@ void (*PeerStatusCallback)(const char *peerId, int status);
 
 // 异步连接结果
 void (*ConnectionResultCallback)(const char *addr, uint8_t success, int errorCode);
+
+// 重连事件（断开 / 重连成功 / 重连失败）
+void (*ReconnectCallback)(const char *peerId, uint8_t status);
 ```
 
 - `PeerStatus` 整数映射：`Connected=0`、`Disconnected=1`、`Reconnecting=2`、`Handshaking=3`
+- `ReconnectStatus` 状态码：`Disconnected=0`（连接断开，即将重连）、`Succeeded=1`（重连成功）、`Failed=2`（重连尝试耗尽）
 - C# 中须将委托保存为静态字段或成员变量，防止被 GC 回收后出现悬空指针。
 - 所有 `Register*Callback` 函数必须在 `InitializeNetwork` 成功后调用，否则返回 `NotInitialized`。
 

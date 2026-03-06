@@ -78,12 +78,14 @@ impl NetworkState {
         config: NetworkConfig,
     ) -> Result<Self, NetworkError> {
         let local_peer_id = PeerId::new(&peer_id);
+        let (reconnect_event_tx, reconnect_event_rx) = mpsc::channel(16);
         let shutdown_token = CancellationToken::new();
 
         let (transport, incoming_rx) = TransportManager::new(
             local_peer_id.clone(),
             session_id.clone(),
             config,
+            reconnect_event_tx,
             shutdown_token.clone(),
         )
         .await?;
@@ -163,6 +165,12 @@ impl NetworkState {
         spawn_membership_event_watcher(
             membership.event_tx.subscribe(),
             Arc::clone(&leader_election),
+            Arc::clone(&callback),
+            shutdown_token.clone(),
+        );
+
+        spawn_reconnect_event_watcher(
+            reconnect_event_rx,
             Arc::clone(&callback),
             shutdown_token.clone(),
         );
@@ -638,6 +646,33 @@ fn spawn_membership_event_watcher(
     });
 }
 
+/// Watch for reconnection lifecycle events from the transport
+/// layer and forward them to the callback manager.
+///
+/// Status values: `0` = disconnected (reconnection starting),
+/// `1` = reconnect succeeded, `2` = reconnect failed (retries exhausted).
+fn spawn_reconnect_event_watcher(
+    mut reconnect_rx: mpsc::Receiver<(PeerId, u8)>,
+    callback: Arc<CallbackManager>,
+    shutdown_token: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_token.cancelled() => break,
+                msg = reconnect_rx.recv() => {
+                    match msg {
+                        Some((peer_id, status)) => {
+                            callback.send_reconnect(&peer_id, status);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,8 +916,6 @@ mod tests {
         assert!(GetLocalAddr().is_null());
     }
 
-    // All FFI tests that touch global state (NETWORK/RUNTIME) are combined
-    // into one function to avoid races when tests run in parallel.
     #[test]
     fn test_ffi_full_lifecycle() {
         use crate::ffi::*;
@@ -930,6 +963,13 @@ mod tests {
         assert_eq!(EnableAutoLeaderElection(0), error::error_codes::OK);
         assert_eq!(EnableAutoLeaderElection(1), error::error_codes::OK);
 
+        // auto-reconnect defaults to enabled
+        assert_eq!(IsAutoReconnectEnabled(), 1);
+        assert_eq!(SetAutoReconnect(0), error::error_codes::OK);
+        assert_eq!(IsAutoReconnectEnabled(), 0);
+        assert_eq!(SetAutoReconnect(1), error::error_codes::OK);
+        assert_eq!(IsAutoReconnectEnabled(), 1);
+
         assert_eq!(EnableLogging(0), error::error_codes::OK);
 
         let unknown = CString::new("unknown_peer").unwrap();
@@ -961,7 +1001,8 @@ mod tests {
             auto_election_enabled: 1,
             manual_override_recovery: 0,
             tcp_nodelay: 0,
-            _padding: [0; 2],
+            auto_reconnect_enabled: 1,
+            reconnect_max_retries: 0,
         };
 
         let r =
@@ -1772,7 +1813,6 @@ mod tests {
             B_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Both nodes send to each other in parallel and verify receipt.
         #[tokio::test]
         async fn test_bidirectional_messaging() {
             A_COUNT.store(0, Ordering::SeqCst);
@@ -1876,7 +1916,6 @@ mod tests {
             SEQ_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Send 20 numbered messages and verify all arrive.
         #[tokio::test]
         async fn test_sequential_delivery() {
             SEQ_COUNT.store(0, Ordering::SeqCst);
@@ -1949,7 +1988,6 @@ mod tests {
             LARGE_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Send a 100 KB payload that will be compressed, then verified intact.
         #[tokio::test]
         async fn test_large_payload_delivery() {
             LARGE_COUNT.store(0, Ordering::SeqCst);
@@ -2016,7 +2054,6 @@ mod tests {
             TF_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Various msg_type values and user flag combinations must survive transport.
         #[tokio::test]
         async fn test_type_and_flags_preserved() {
             TF_COUNT.store(0, Ordering::SeqCst);
@@ -2102,7 +2139,6 @@ mod tests {
             MESH_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// 3 nodes, full mesh, each broadcasts – every node should hear from the other 2.
         #[tokio::test]
         async fn test_full_mesh_broadcast() {
             MESH_COUNT.store(0, Ordering::SeqCst);
@@ -2184,7 +2220,6 @@ mod tests {
             STATUS_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Connect two nodes, verify Connected callback, disconnect, verify Disconnected.
         #[tokio::test]
         async fn test_status_callbacks_on_connect_disconnect() {
             STATUS_COUNT.store(0, Ordering::SeqCst);
@@ -2265,7 +2300,6 @@ mod tests {
             RECON_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Disconnect, manually reconnect, then verify messaging works again.
         #[tokio::test]
         async fn test_reconnect_then_message() {
             RECON_COUNT.store(0, Ordering::SeqCst);
@@ -2348,8 +2382,6 @@ mod tests {
             CENT_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// In centralized mode a follower broadcast is forwarded to the leader,
-        /// and the leader re-broadcasts it. Verify end-to-end delivery.
         #[tokio::test]
         async fn test_centralized_broadcast_delivery() {
             CENT_COUNT.store(0, Ordering::SeqCst);
@@ -2476,7 +2508,6 @@ mod tests {
             LB_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Elect a leader and use send_from_leader to broadcast, verify followers receive it.
         #[tokio::test]
         async fn test_leader_broadcast_delivery() {
             LB_COUNT.store(0, Ordering::SeqCst);
@@ -2567,7 +2598,6 @@ mod tests {
             DJ_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// 3 nodes start, then a 4th joins late, and messages flow to it.
         #[tokio::test]
         async fn test_late_joiner_receives_messages() {
             DJ_COUNT.store(0, Ordering::SeqCst);
@@ -2653,10 +2683,6 @@ mod tests {
             MDNS_DISC_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Two nodes with the same session auto-discover via mDNS
-        /// without any manual `connect_to`. Verifies messaging works
-        /// over the auto-discovered connection.
-        /// Skipped when mDNS multicast is unavailable on the host.
         #[tokio::test]
         async fn test_mdns_discovers_and_connects() {
             if !mdns_available().await {
@@ -2715,8 +2741,6 @@ mod tests {
     mod e2e_mdns_cross_session_no_connect {
         use super::*;
 
-        /// Two nodes in different sessions must NOT auto-connect via mDNS.
-        /// Skipped when mDNS multicast is unavailable on the host.
         #[tokio::test]
         async fn test_mdns_different_session_no_connect() {
             if !mdns_available().await {
@@ -2771,9 +2795,6 @@ mod tests {
             MDNS3_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Three nodes in the same session form a full mesh via mDNS only.
-        /// Then broadcast from one and verify all others receive the message.
-        /// Skipped when mDNS multicast is unavailable on the host.
         #[tokio::test]
         async fn test_mdns_three_node_auto_mesh() {
             if !mdns_available().await {
@@ -2836,8 +2857,6 @@ mod tests {
     mod e2e_duplicate_peer_id_rejected {
         use super::*;
 
-        /// If a node with the same peer_id as an already-connected peer
-        /// attempts to connect, the handshake must reject it.
         #[tokio::test]
         async fn test_duplicate_peer_id_connection_rejected() {
             let a = create_node("dup_host", "session_dup_id").await;
@@ -2878,9 +2897,6 @@ mod tests {
     mod e2e_peer_list_sync_auto_mesh {
         use super::*;
 
-        /// A connects to B. Then C connects to A. A sends PeerListSync
-        /// to C containing B's address. C should auto-connect to B,
-        /// forming a full mesh without explicit instructions.
         #[tokio::test]
         async fn test_peer_list_sync_auto_mesh() {
             // Names chosen so that "pls_c" < "pls_b" is FALSE and
@@ -2945,8 +2961,6 @@ mod tests {
             CS_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Three senders each fire 5 messages to a single receiver
-        /// simultaneously. All 15 must arrive.
         #[tokio::test]
         async fn test_concurrent_senders_all_delivered() {
             CS_COUNT.store(0, Ordering::SeqCst);
@@ -3025,7 +3039,6 @@ mod tests {
             EMPTY_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// A zero-length user message must be delivered intact.
         #[tokio::test]
         async fn test_empty_payload_delivery() {
             EMPTY_COUNT.store(0, Ordering::SeqCst);
@@ -3067,8 +3080,6 @@ mod tests {
     mod e2e_leader_election_consensus {
         use super::*;
 
-        /// Three nodes form a mesh with fast election timers.
-        /// Verify all three nodes agree on the same leader.
         #[tokio::test]
         async fn test_all_nodes_agree_on_leader() {
             let config = NetworkConfig {
@@ -3154,8 +3165,6 @@ mod tests {
             LEAVE_STATUS_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// A, B, C are connected. B shuts down gracefully (broadcasts PeerLeave).
-        /// A and C must detect that B has left.
         #[tokio::test]
         async fn test_graceful_leave_propagates() {
             LEAVE_STATUS_COUNT.store(0, Ordering::SeqCst);
@@ -3217,8 +3226,6 @@ mod tests {
     mod e2e_connect_refused {
         use super::*;
 
-        /// Connecting to a port that actively refuses connections must
-        /// return an error without crashing the node.
         #[tokio::test]
         async fn test_connection_refused_graceful() {
             let node = create_node("refuse_a", "session_refuse").await;
@@ -3252,9 +3259,6 @@ mod tests {
     mod e2e_leader_failover {
         use super::*;
 
-        /// Three-node mesh. The elected leader shuts down. The two
-        /// remaining nodes must elect a new leader within a reasonable
-        /// time.
         #[tokio::test]
         async fn test_leader_failover_new_election() {
             let config = NetworkConfig {
@@ -3408,9 +3412,6 @@ mod tests {
             FOLLOWER_RECV_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Follower sends a message to the leader via ToLeader,
-        /// then leader sends a broadcast via send_from_leader.
-        /// Both must be received correctly.
         #[tokio::test]
         async fn test_send_to_leader_and_from_leader() {
             LEADER_RECV_COUNT.store(0, Ordering::SeqCst);
@@ -3534,9 +3535,6 @@ mod tests {
             FWD_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Three nodes. Leader uses forward_message to relay a message
-        /// from an external source to a specific follower. The target
-        /// follower must receive the forwarded data.
         #[tokio::test]
         async fn test_forward_message_delivery_to_follower() {
             FWD_COUNT.store(0, Ordering::SeqCst);
@@ -3658,10 +3656,6 @@ mod tests {
             LZ4_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Send a highly compressible payload above the compression
-        /// threshold. Verify the receiver gets the original data intact.
-        /// Also send a small payload below threshold to confirm it is
-        /// NOT compressed.
         #[tokio::test]
         async fn test_compression_roundtrip() {
             LZ4_COUNT.store(0, Ordering::SeqCst);
@@ -3740,10 +3734,6 @@ mod tests {
             KA_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Connect two nodes with very short heartbeat/timeout windows.
-        /// Then freeze one node (drop its transport without sending
-        /// PeerLeave). The other node should detect the timeout and
-        /// report a Disconnected status.
         #[tokio::test]
         async fn test_keepalive_timeout_detection() {
             KA_COUNT.store(0, Ordering::SeqCst);
@@ -3867,8 +3857,6 @@ mod tests {
             (success, reject, streams)
         }
 
-        /// Saturate the server with raw handshake connections, verify
-        /// some are rejected, then verify recovery after disconnect.
         #[tokio::test]
         async fn test_max_connections_rejection() {
             let server = create_node("mc_server", "session_mc").await;
@@ -3921,9 +3909,6 @@ mod tests {
         use crate::protocol::InternalMessage;
         use crate::transport::PacketCodec;
 
-        /// Raw TCP connection sending a wrong protocol version.
-        /// The server must reject with version_mismatch and remain
-        /// functional for subsequent correct connections.
         #[tokio::test]
         async fn test_version_mismatch_then_recovery() {
             let node = create_node("vm_server", "session_vm").await;
@@ -3988,9 +3973,6 @@ mod tests {
     mod e2e_ffi_wrong_order {
         use super::*;
 
-        /// Call FFI operations that require initialization BEFORE
-        /// InitializeNetwork is called. They must return appropriate
-        /// error codes without crashing.
         #[test]
         fn test_ffi_operations_before_init() {
             use crate::ffi::*;
@@ -4068,8 +4050,6 @@ mod tests {
             RAPID_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        /// Rapidly connect, disconnect, reconnect the same two nodes
-        /// 10 times, then verify messaging still works after the storm.
         #[tokio::test]
         async fn test_rapid_reconnect_then_message() {
             RAPID_COUNT.store(0, Ordering::SeqCst);
@@ -4135,9 +4115,6 @@ mod tests {
     mod e2e_mdns_race_connect_then_manual {
         use super::*;
 
-        /// Two peers in the same session with mDNS enabled. After mDNS
-        /// auto-connects them, a manual `ConnectToPeer` to the same peer
-        /// should return `AlreadyConnected` rather than a hard error.
         #[tokio::test]
         async fn test_mdns_race_connect_then_manual() {
             if !mdns_available().await {
@@ -4189,10 +4166,6 @@ mod tests {
     mod e2e_election_skips_known_leader {
         use super::*;
 
-        /// Two nodes connected with auto-election. Once a leader is
-        /// elected, the election term should stabilize — no unnecessary
-        /// re-elections. Verify by checking that the term stays constant
-        /// for several election timeout periods.
         #[tokio::test]
         async fn test_election_skips_known_leader() {
             let config = NetworkConfig {
@@ -4254,10 +4227,6 @@ mod tests {
     mod e2e_manual_leader_survives_heartbeat {
         use super::*;
 
-        /// Manually assign a leader via `set_leader`, then let another
-        /// node win an election (producing higher-term heartbeats). The
-        /// manual leader assignment must not be overridden on nodes
-        /// where `manual_override` is active.
         #[tokio::test]
         async fn test_manual_leader_survives_heartbeat() {
             let config = NetworkConfig {
@@ -4407,7 +4376,8 @@ mod tests {
             auto_election_enabled: 1,
             manual_override_recovery: 0,
             tcp_nodelay: 1,
-            _padding: [0; 2],
+            auto_reconnect_enabled: 1,
+            reconnect_max_retries: 0,
         };
 
         let cfg = NetworkConfig::from(&ffi);
@@ -4430,7 +4400,6 @@ mod tests {
         );
     }
 
-    /// Verify default keepalive config values.
     #[test]
     fn test_keepalive_defaults() {
         let cfg = NetworkConfig::default();
@@ -4439,7 +4408,6 @@ mod tests {
         assert_eq!(cfg.keepalive_retries, 3);
     }
 
-    /// Validation rejects zero keepalive values.
     #[test]
     fn test_keepalive_validation() {
         let cfg = NetworkConfig {
@@ -4463,7 +4431,6 @@ mod tests {
         assert!(NetworkConfig::default().validate().is_ok());
     }
 
-    /// FFI round-trip for keepalive fields.
     #[test]
     fn test_ffi_keepalive_roundtrip() {
         use crate::ffi::NetworkConfigFFI;
@@ -4489,7 +4456,8 @@ mod tests {
             auto_election_enabled: 1,
             manual_override_recovery: 0,
             tcp_nodelay: 0,
-            _padding: [0; 2],
+            auto_reconnect_enabled: 1,
+            reconnect_max_retries: 0,
         };
 
         let cfg = NetworkConfig::from(&ffi);
@@ -4498,7 +4466,6 @@ mod tests {
         assert_eq!(cfg.keepalive_retries, 5);
     }
 
-    /// Nodes with custom keepalive settings connect and exchange successfully.
     #[tokio::test]
     async fn test_custom_keepalive_connect_and_exchange() {
         let config = NetworkConfig {

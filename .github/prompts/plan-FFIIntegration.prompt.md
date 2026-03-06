@@ -22,6 +22,7 @@ pub struct CallbackManager {
     leader_changed_callback: Mutex<Option<LeaderChangedCallback>>,
     peer_status_callback: Mutex<Option<PeerStatusCallback>>,
     connection_result_callback: Arc<Mutex<Option<ConnectionResultCallback>>>,
+    reconnect_callback: Arc<Mutex<Option<ReconnectCallback>>>,
     event_tx: Mutex<Option<tokio::sync::mpsc::Sender<CallbackEvent>>>,
     callback_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     shutdown: Arc<AtomicBool>,
@@ -36,6 +37,7 @@ pub struct CallbackManager {
 | `LeaderChangedCallback`    | `(leader_peer_id: *const c_char)`                                                                    |
 | `PeerStatusCallback`       | `(peer_id: *const c_char, status: i32)` — 0=Connected, 1=Disconnected, 2=Reconnecting, 3=Handshaking |
 | `ConnectionResultCallback` | `(addr: *const c_char, success: u8, error_code: i32)`                                                |
+| `ReconnectCallback`        | `(peer_id: *const c_char, status: u8)` — 0=Disconnected, 1=Succeeded, 2=Failed                       |
 
 **设计要点：**
 
@@ -107,12 +109,14 @@ static LAST_RETURNED_STRING: Mutex<Option<CString>> = Mutex::new(None);
 | `SendToLeader`                | `(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                                             |                                                                                                                |
 | `SendFromLeader`              | `(data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32`                                             |                                                                                                                |
 | `ForwardMessage`              | `(from: *const c_char, target: *const c_char, data: *const u8, length: i32, msg_type: u16, flags: u8) -> i32` | target=null 广播                                                                                               |
-| `Register*Callback`           | `(callback: FnPtr) -> i32`                                                                                    | null=注销，共 4 个                                                                                             |
+| `Register*Callback`           | `(callback: FnPtr) -> i32`                                                                                    | null=注销，共 5 个                                                                                             |
+| `SetAutoReconnect`            | `(enable: u8) -> i32`                                                                                         | 0=禁用，1=启用（默认 1）                                                                                       |
+| `IsAutoReconnectEnabled`      | `() -> u8`                                                                                                    | 返回 1=已启用，0=已禁用                                                                                        |
 | `EnableLogging`               | `(enable: u8) -> i32`                                                                                         | 仅首次生效                                                                                                     |
 
 #### NetworkConfigFFI
 
-字段按对齐大小降序排列（u32 → u16 → u8，最后显式 padding），`#[repr(C)]` 布局（总大小 40 字节）：
+字段按对齐大小降序排列（u32 → u16 → u8），`#[repr(C)]` 布局（总大小 40 字节）：
 
 ```rust
 #[repr(C)]
@@ -138,11 +142,12 @@ pub struct NetworkConfigFFI {
     pub auto_election_enabled: u8,         // offset 35
     pub manual_override_recovery: u8,      // offset 36 — 0=Hold, 1=AutoElect
     pub tcp_nodelay: u8,                   // offset 37 — 0=Nagle enabled, 1=Nagle disabled
-    pub _padding: [u8; 2],                 // offset 38 — 对齐填充
+    pub auto_reconnect_enabled: u8,        // offset 38 — 0=禁用自动重连, 1=启用（默认 1）
+    pub reconnect_max_retries: u8,         // offset 39 — 最大重连次数，0=无限（默认 0）
 }   // sizeof = 40
 ```
 
-C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u32→uint`，`u16→ushort`，`u8→byte`，padding 用 2 个 `private byte`（`_padding1`, `_padding2`）。keepalive 三字段中 `keepalive_time_secs`/`keepalive_interval_secs` 对应 C# `ushort`，`keepalive_retries` 对应 C# `byte`（Windows 上被忽略）。
+C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u32→uint`，`u16→ushort`，`u8→byte`。keepalive 三字段中 `keepalive_time_secs`/`keepalive_interval_secs` 对应 C# `ushort`，`keepalive_retries` 对应 C# `byte`（Windows 上被忽略）。`auto_reconnect_enabled` 和 `reconnect_max_retries` 对应 C# `byte`。
 
 `InitializeNetworkWithConfig` 先转换为 `NetworkConfig`，再调 `config.validate()` 验证参数。
 
@@ -235,7 +240,7 @@ fn return_string(s: String) -> *const c_char {
 ## Verification
 
 - 所有 FFI 函数有 `catch_unwind`，无 `bool` 跨边界
-- `NetworkConfigFFI` 大小为 40 字节（零隐式 padding + 1 处显式 padding（offset 38，`_padding: [u8; 2]`），4 字节对齐；keepalive 三字段位于 offset 26/28/33）
+- `NetworkConfigFFI` 大小为 40 字节（零隐式 padding，offset 38-39 为 `auto_reconnect_enabled` 和 `reconnect_max_retries`，4 字节对齐；keepalive 三字段位于 offset 26/28/33）
 - Shutdown 顺序：PeerLeave → drain → cancel → discovery → drain_callback → transport → join_callback_thread → destroy Runtime
 - Shutdown 后可再次 Initialize
 - `error_codes` 从 `error.rs` 导入

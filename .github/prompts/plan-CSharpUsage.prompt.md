@@ -71,7 +71,7 @@ public enum PeerStatus
 ### 网络事件（回调线程 → 主线程的中转结构）
 
 ```csharp
-public enum NetworkEventType { Message, PeerStatus, LeaderChanged, ConnectionResult }
+public enum NetworkEventType { Message, PeerStatus, LeaderChanged, ConnectionResult, Reconnect }
 
 public struct NetworkEvent
 {
@@ -82,6 +82,7 @@ public struct NetworkEvent
     public PeerStatus Status;
     public bool Success;
     public int ErrorCode;
+    public ReconnectStatus ReconnectStatus;
 }
 ```
 
@@ -141,8 +142,10 @@ public struct NetworkConfigFFI
     public byte  manual_override_recovery;
     /// <summary>禁用 Nagle 算法（TCP_NODELAY）。0=启用 Nagle，1=禁用。默认 1</summary>
     public byte  tcp_nodelay;
-    private byte _padding1; // 对齐填充，勿修改
-    private byte _padding2;
+    /// <summary>自动重连开关。0=禁用，1=启用。默认 1</summary>
+    public byte  auto_reconnect_enabled;
+    /// <summary>最大重连次数，0=无限。默认 0</summary>
+    public byte  reconnect_max_retries;
 
     /// <summary>返回所有字段为默认值的配置实例。</summary>
     public static NetworkConfigFFI Default() => new()
@@ -166,6 +169,8 @@ public struct NetworkConfigFFI
         auto_election_enabled = 1,
         manual_override_recovery = 0,
         tcp_nodelay = 1,
+        auto_reconnect_enabled = 1,
+        reconnect_max_retries = 0,
     };
 }
 ```
@@ -193,6 +198,10 @@ public delegate void PeerStatusCallback(IntPtr peerId, int status);
 /// <summary>ConnectToPeer 异步操作完成时触发。success: 0=失败, 1=成功。</summary>
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate void ConnectionResultCallback(IntPtr addr, byte success, int errorCode);
+
+/// <summary>重连事件回调。status: 0=断开, 1=重连成功, 2=重连失败。</summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void ReconnectCallback(IntPtr peerId, byte status);
 ```
 
 ---
@@ -404,6 +413,22 @@ public static class MetaMystiaNetwork
     /// <summary>注册 ConnectToPeer 异步结果回调。传 null 注销。</summary>
     [DllImport(DLL, CallingConvention = CC)]
     public static extern int RegisterConnectionResultCallback(ConnectionResultCallback callback);
+
+    /// <summary>注册重连事件回调。传 null 注销。</summary>
+    [DllImport(DLL, CallingConvention = CC)]
+    public static extern int RegisterReconnectCallback(ReconnectCallback callback);
+
+    #endregion
+
+    #region 自动重连控制
+
+    /// <summary>启用(1)或禁用(0)自动重连。默认启用。</summary>
+    [DllImport(DLL, CallingConvention = CC)]
+    public static extern int SetAutoReconnect(byte enable);
+
+    /// <summary>查询自动重连是否启用。1=启用，0=禁用。</summary>
+    [DllImport(DLL, CallingConvention = CC)]
+    public static extern byte IsAutoReconnectEnabled();
 
     #endregion
 

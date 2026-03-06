@@ -114,6 +114,10 @@ pub struct NetworkConfig {
     pub manual_override_recovery: ManualOverrideRecovery,
     /// 是否禁用 Nagle 算法（TCP_NODELAY），默认 true
     pub tcp_nodelay: bool,
+    /// 是否自动重连，默认 true
+    pub auto_reconnect_enabled: bool,
+    /// 最大重连次数，0=无限，默认 0
+    pub reconnect_max_retries: u8,
 }
 
 impl Default for NetworkConfig {
@@ -138,6 +142,8 @@ impl Default for NetworkConfig {
             auto_election_enabled: true,
             manual_override_recovery: ManualOverrideRecovery::Hold,
             tcp_nodelay: true,
+            auto_reconnect_enabled: true,
+            reconnect_max_retries: 0,
         }
     }
 }
@@ -379,7 +385,7 @@ impl NetworkError {
 
 ## 实现映射（关键常量与 FFI 相关项）
 
-- **NetworkConfigFFI**：位于 `src/ffi.rs` 的 `NetworkConfigFFI` 与本模块的 `NetworkConfig` 通过 `impl From<&NetworkConfigFFI> for NetworkConfig` 映射（字段一一对应，padding 已考虑）。
+- **NetworkConfigFFI**：位于 `src/ffi.rs` 的 `NetworkConfigFFI` 与本模块的 `NetworkConfig` 通过 `impl From<&NetworkConfigFFI> for NetworkConfig` 映射（字段一一对应，offset 38-39 为 `auto_reconnect_enabled` 和 `reconnect_max_retries`）。
 - **错误码**：`error_codes` 常量定义在 `src/error.rs`，FFI 函数统一返回 `i32` 错误码并可通过 `GetLastErrorCode`/`GetLastErrorMessage` 查询。
 - **消息类型边界**：`msg_types::USER_MESSAGE_START == 0x0100` 为用户消息起点，FFI 与发送接口均在入口处验证该边界（见 `src/ffi.rs` 的 `BroadcastMessage` / `SendToPeer` 调用链）。
 
