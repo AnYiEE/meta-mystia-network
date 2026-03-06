@@ -4,6 +4,9 @@
   "[csharp]": {
     "editor.defaultFormatter": "ms-dotnettools.csharp"
   },
+  "[powershell]": {
+    "editor.defaultFormatter": "ms-vscode.powershell"
+  },
   "[rust]": {
     "editor.defaultFormatter": "rust-lang.rust-analyzer"
   },
@@ -31,15 +34,18 @@
     "debuginfo",
     "Dnscache",
     "dont",
+    "dsym",
     "dumpbin",
     "GETPEERCOUNT",
     "keepalive",
     "KEEPCNT",
+    "LASTEXITCODE",
     "libmeta",
     "mdns",
     "metamystia",
     "millis",
     "mpsc",
+    "msvc",
     "mystia",
     "Nagle",
     "Nagle's",
@@ -51,6 +57,7 @@
     "reinit",
     "repr",
     "rlib",
+    "rustflags",
     "SENDTO",
     "serde",
     "TOCTOU",
@@ -58,6 +65,7 @@
     "usize",
     "varint",
     "winres",
-    "xunit"
+    "xunit",
+    "zigbuild"
   ]
 }

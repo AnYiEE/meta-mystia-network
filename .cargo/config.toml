@@ -1,0 +1,5 @@
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "split-debuginfo=off"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "split-debuginfo=off"]

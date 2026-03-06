@@ -14,6 +14,7 @@ Rust 侧接口定义见 `plan-FFIIntegration.prompt.md`。
 | ------- | ------------------------------ | ------------------------------- |
 | Windows | `meta_mystia_network.dll`      | `BepInEx/plugins/` 或游戏根目录 |
 | macOS   | `libmeta_mystia_network.dylib` | 同上                            |
+| Linux   | `libmeta_mystia_network.so`    | 同上                            |
 
 ---
 

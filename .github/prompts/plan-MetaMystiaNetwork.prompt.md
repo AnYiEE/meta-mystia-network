@@ -201,16 +201,17 @@ graph TD
 
 ## 跨平台支持
 
-| 平台    | 产物名称                       | 验证工具           |
-| ------- | ------------------------------ | ------------------ |
-| Windows | `meta_mystia_network.dll`      | `dumpbin /exports` |
-| macOS   | `libmeta_mystia_network.dylib` | `nm -gU` / `otool` |
+| 平台    | 产物名称                       | 验证工具            |
+| ------- | ------------------------------ | ------------------- |
+| Windows | `meta_mystia_network.dll`      | `dumpbin /exports`  |
+| macOS   | `libmeta_mystia_network.dylib` | `nm -gU` / `otool`  |
+| Linux   | `libmeta_mystia_network.so`    | `nm -D` / `readelf` |
 
 **平台差异注意事项：**
 
 - **TCP Keep-alive（可配置）**：`keepalive_time_secs`、`keepalive_interval_secs`、`keepalive_retries` 均由 `NetworkConfig` 字段控制，默认值 60/10/3。其中 `TCP_KEEPCNT`（重试次数）在 Windows 上不可直接设置，仅 macOS/Linux 支持。代码在 Windows 上跳过此设置而非报错。
 - **mDNS**：macOS 原生支持 Bonjour，Windows 依赖 `mdns-sd` crate 的多播 UDP 实现，两者行为一致但需分别测试。
-- **DLL 路径**：C# P/Invoke 的 `DllImport` 中库名不带扩展名（如 `"meta_mystia_network"`），运行时自动匹配平台扩展名。
+- **DLL 路径**：C# P/Invoke 的 `DllImport` 中库名不带扩展名（如 `"meta_mystia_network"`），运行时自动匹配平台扩展名（`.dll` / `.dylib` / `.so`）。
 
 ---
 
@@ -276,17 +277,11 @@ graph TD
 
 ## Verification
 
-1. **编译验证（双平台）**
+1. **编译验证（多平台）**
 
    ```powershell
-   # Windows
-   cargo build --release
-   cargo build --release --features logging
-   ```
-
-   ```bash
-   # macOS
-   cargo build --release --target aarch64-apple-darwin
+   # 使用一键构建脚本（生成所有平台×所有 feature 组合）
+   ./build_all.ps1
    ```
 
 2. **测试验证**
@@ -301,20 +296,26 @@ graph TD
 
    ```powershell
    # Windows: 检查体积（预期 < 2MB）+ 导出符号
-   (Get-Item target/release/meta_mystia_network.dll).Length / 1MB
-   dumpbin /exports target/release/meta_mystia_network.dll
+   (Get-Item target/x86_64-pc-windows-msvc/release/meta_mystia_network.dll).Length / 1MB
+   dumpbin /exports target/x86_64-pc-windows-msvc/release/meta_mystia_network.dll
    ```
 
    ```bash
    # macOS: 检查体积 + 导出符号
-   ls -lh target/release/libmeta_mystia_network.dylib
-   nm -gU target/release/libmeta_mystia_network.dylib | grep -E "^_[A-Z]"
+   ls -lh target/universal2-apple-darwin/release/libmeta_mystia_network.dylib
+   nm -gU target/universal2-apple-darwin/release/libmeta_mystia_network.dylib | grep -E "^_[A-Z]"
+   ```
+
+   ```bash
+   # Linux: 检查体积 + 导出符号
+   ls -lh target/x86_64-unknown-linux-gnu/release/libmeta_mystia_network.so
+   nm -D target/x86_64-unknown-linux-gnu/release/libmeta_mystia_network.so | grep -E "^[0-9a-f]+ T"
    ```
 
 4. **C# P/Invoke 测试**
 
    ```csharp
-   // 库名不带扩展名，运行时自动匹配 .dll / .dylib
+   // 库名不带扩展名，运行时自动匹配 .dll / .dylib / .so
    [DllImport("meta_mystia_network")]
    static extern int InitializeNetwork(string peerId, string sessionId);
 
@@ -359,4 +360,4 @@ graph TD
    - 验证 mDNS 发现 → 自动连接 → 选主 → 消息收发
    - 杀掉 Leader 进程 → 验证重新选举
    - 恢复 Leader 进程 → 验证重连
-   - **双平台分别验证**
+   - **所有目标平台分别验证**

@@ -2,6 +2,7 @@
   "recommendations": [
     "EditorConfig.EditorConfig",
     "ms-dotnettools.csharp",
+    "ms-vscode.powershell",
     "redhat.vscode-xml",
     "rust-lang.rust-analyzer",
     "streetsidesoftware.code-spell-checker",

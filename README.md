@@ -32,19 +32,42 @@
 
 ### 构建
 
+#### 单平台
+
 ```bash
 cargo build --release
 cargo build --release --features logging # 开启 logging 特性以输出内部日志到标准输出/错误
 ```
 
-产物位于 `target/release/`：
+**支持的目标平台**
 
-| 平台    | 文件名                         |
-| ------- | ------------------------------ |
-| Windows | `meta_mystia_network.dll`      |
-| macOS   | `libmeta_mystia_network.dylib` |
+| 目标 Triple                 | 产物文件名                     | 调试信息 |
+| --------------------------- | ------------------------------ | -------- |
+| `x86_64-pc-windows-msvc`    | `meta_mystia_network.dll`      | `.pdb`   |
+| `aarch64-pc-windows-msvc`   | `meta_mystia_network.dll`      | `.pdb`   |
+| `universal2-apple-darwin`   | `libmeta_mystia_network.dylib` | `.dSYM`  |
+| `x86_64-unknown-linux-gnu`  | `libmeta_mystia_network.so`    | `.dwp`   |
+| `aarch64-unknown-linux-gnu` | `libmeta_mystia_network.so`    | `.dwp`   |
+
+#### 全平台一键构建
+
+**环境要求**
+
+- Windows 目标：MSVC 工具链（`x86_64-pc-windows-msvc`、`aarch64-pc-windows-msvc`）
+- Linux / macOS 目标：[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) + [Zig](https://ziglang.org/)（用于交叉编译）
+
+```powershell
+./build_all.ps1
+```
+
+该脚本为每个目标平台分别构建默认版本与 `logging` 版本（共 10 次），Windows 目标使用 `cargo build`，Linux / macOS 目标使用 `cargo zigbuild`，所有产物统一复制到 `target/output/` 目录并按 `{name}[-logging]-{target}.{ext}` 格式重命名。
 
 ### 测试
+
+#### 环境要求
+
+- MSVC 工具链（`x86_64-pc-windows-msvc`）
+- .NET 6.0
 
 ```bash
 cargo test
