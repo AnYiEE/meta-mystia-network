@@ -1,6 +1,6 @@
 [package]
 name = "meta-mystia-network"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["AnYiEE <i@anyi.in>"]
 edition = "2024"
 description = "A lightweight P2P network library. Repository: https://github.com/AnYiEE/meta-mystia-network"
