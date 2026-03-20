@@ -60,7 +60,7 @@ impl DiscoveryManager {
         let daemon = ServiceDaemon::new_with_port(mdns_port)
             .map_err(|e| NetworkError::Internal(format!("failed to create mDNS daemon: {e}")))?;
 
-        let instance_name = format!("{}_{}", session_id, local_peer_id);
+        let instance_name = make_unique_dns_label(&format!("{}_{}", session_id, local_peer_id));
 
         Ok(Self {
             daemon,
@@ -85,9 +85,10 @@ impl DiscoveryManager {
     /// Create and register the local mDNS service using our peer
     /// ID, session, and protocol version as properties.
     fn register_service(&self) -> Result<(), NetworkError> {
-        let hostname = hostname::get()
+        let hostname_raw = hostname::get()
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown".into());
+        let hostname = dns_label_truncate(&hostname_raw);
 
         let protocol_version = PROTOCOL_VERSION.to_string();
         let properties = [
@@ -254,6 +255,53 @@ impl DiscoveryManager {
     }
 }
 
+const MAX_DNS_LABEL_BYTES: usize = 63;
+
+/// Truncate a string to at most 63 bytes, respecting UTF-8 character
+/// boundaries. DNS labels are limited to 63 bytes per RFC 1035 §2.3.4.
+/// Use only when uniqueness is not required (e.g. the SRV hostname field).
+fn dns_label_truncate(s: &str) -> &str {
+    if s.len() <= MAX_DNS_LABEL_BYTES {
+        return s;
+    }
+
+    let mut end = MAX_DNS_LABEL_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    &s[..end]
+}
+
+/// Build a DNS label of at most 63 bytes that is unique for each distinct
+/// input string (RFC 1035 §2.3.4). When `s` fits in 63 bytes it is returned
+/// unchanged. Otherwise the label is composed of a UTF-8-safe prefix followed
+/// by `_` and a 16-character (64-bit) FNV-1a hex digest so that two inputs
+/// that merely share the same prefix are never collapsed into the same label.
+fn make_unique_dns_label(s: &str) -> String {
+    if s.len() <= MAX_DNS_LABEL_BYTES {
+        return s.to_string();
+    }
+
+    // Reserve 17 bytes for "_" + 16 hex digits; the rest is the prefix.
+    let mut end = MAX_DNS_LABEL_BYTES - 17;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!("{}_{}", &s[..end], format!("{:016x}", fnv1a_64(s)))
+}
+
+/// FNV-1a 64-bit hash. Deterministic, dependency-free.
+fn fnv1a_64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +451,79 @@ mod tests {
     fn test_connect_to_discovery_server_not_implemented() {
         let result = DiscoveryManager::connect_to_discovery_server("1.2.3.4:5000");
         assert!(matches!(result, Err(NetworkError::NotImplemented)));
+    }
+
+    #[test]
+    fn test_dns_label_truncate_within_limit() {
+        let s = "short";
+        assert_eq!(dns_label_truncate(s), s);
+    }
+
+    #[test]
+    fn test_dns_label_truncate_exactly_63() {
+        let s = "a".repeat(63);
+        assert_eq!(dns_label_truncate(&s), s);
+    }
+
+    #[test]
+    fn test_dns_label_truncate_over_limit() {
+        let s = "a".repeat(100);
+        let result = dns_label_truncate(&s);
+        assert_eq!(result.len(), 63);
+    }
+
+    #[test]
+    fn test_dns_label_truncate_multi_byte_boundary() {
+        let s = "中".repeat(22);
+        let result = dns_label_truncate(&s);
+        assert!(result.len() <= 63);
+        assert!(s.is_char_boundary(result.len()));
+    }
+
+    #[test]
+    fn test_make_unique_dns_label_within_limit() {
+        let s = "session_peer";
+        assert_eq!(make_unique_dns_label(s), s);
+    }
+
+    #[test]
+    fn test_make_unique_dns_label_exactly_63() {
+        let s = "a".repeat(63);
+        assert_eq!(make_unique_dns_label(&s), s);
+    }
+
+    #[test]
+    fn test_make_unique_dns_label_over_limit_length() {
+        let s = "a".repeat(100);
+        let result = make_unique_dns_label(&s);
+        assert!(result.len() <= 63, "label must not exceed 63 bytes");
+    }
+
+    #[test]
+    fn test_make_unique_dns_label_no_collision() {
+        let base = "x".repeat(46);
+        let a = format!("{base}{}", "a".repeat(20));
+        let b = format!("{base}{}", "b".repeat(20));
+        let label_a = make_unique_dns_label(&a);
+        let label_b = make_unique_dns_label(&b);
+        assert_ne!(
+            label_a, label_b,
+            "distinct inputs must yield distinct labels"
+        );
+    }
+
+    #[test]
+    fn test_make_unique_dns_label_deterministic() {
+        let s = "session_abc_peer_xyz".repeat(5); // > 63 bytes
+        assert_eq!(make_unique_dns_label(&s), make_unique_dns_label(&s));
+    }
+
+    #[test]
+    fn test_make_unique_dns_label_multi_byte_boundary() {
+        let prefix = "a".repeat(45);
+        let s = format!("{prefix}中中中中中中中中中中");
+        let result = make_unique_dns_label(&s);
+        assert!(result.len() <= 63);
+        assert!(result.starts_with(&prefix));
     }
 }
