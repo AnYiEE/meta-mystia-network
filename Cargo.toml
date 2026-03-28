@@ -52,6 +52,8 @@ thunk-rs = { version = "0.3", features = [
   "lib",
   "win7",
 ], default-features = false }
+
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 
 [lib]

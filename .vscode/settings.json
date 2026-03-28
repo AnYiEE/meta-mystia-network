@@ -37,6 +37,7 @@
     "dsym",
     "dumpbin",
     "GETPEERCOUNT",
+    "gnullvm",
     "keepalive",
     "KEEPCNT",
     "LASTEXITCODE",

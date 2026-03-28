@@ -5,11 +5,13 @@
     Build meta-mystia-network for all target platforms and feature configurations.
 .DESCRIPTION
     Builds both default and logging variants for:
-      - x86_64-pc-windows-msvc
-      - aarch64-pc-windows-msvc
+      - x86_64-pc-windows-msvc / x86_64-pc-windows-gnu
+      - aarch64-pc-windows-msvc / aarch64-pc-windows-gnullvm
       - universal2-apple-darwin   (via cargo-zigbuild)
       - x86_64-unknown-linux-gnu  (via cargo-zigbuild)
       - aarch64-unknown-linux-gnu (via cargo-zigbuild)
+    On Windows hosts, MSVC toolchain is used for Windows targets.
+    On non-Windows hosts (macOS/Linux), gnu/gnullvm toolchain is used for Windows targets.
     All artifacts are collected into the ./target/output directory with unified naming.
 #>
 
@@ -18,10 +20,26 @@ $ErrorActionPreference = "Stop"
 $LibName = "meta_mystia_network"
 $OutputDir = Join-Path $PSScriptRoot "target" "output"
 
+# Detect host OS and choose Windows target ABI and build tool
+if ($IsWindows) {
+  $WinX64 = "x86_64-pc-windows-msvc"
+  $WinArm = "aarch64-pc-windows-msvc"
+  $WinDebugExt = "pdb"
+  $WinZigbuild = $false
+}
+else {
+  # aarch64-pc-windows-gnu is not available on non-Windows hosts,
+  # so x86_64 uses gnu and aarch64 uses gnullvm; both via cargo-zigbuild
+  $WinX64 = "x86_64-pc-windows-gnu"
+  $WinArm = "aarch64-pc-windows-gnullvm"
+  $WinDebugExt = $null
+  $WinZigbuild = $true
+}
+
 # Target definitions
 $Targets = @(
-  @{ Triple = "x86_64-pc-windows-msvc"; Ext = "dll"; DebugExt = "pdb"; Prefix = ""; Zigbuild = $false },
-  @{ Triple = "aarch64-pc-windows-msvc"; Ext = "dll"; DebugExt = "pdb"; Prefix = ""; Zigbuild = $false },
+  @{ Triple = $WinX64; Ext = "dll"; DebugExt = $WinDebugExt; Prefix = ""; Zigbuild = $WinZigbuild },
+  @{ Triple = $WinArm; Ext = "dll"; DebugExt = $WinDebugExt; Prefix = ""; Zigbuild = $WinZigbuild },
   @{ Triple = "universal2-apple-darwin"; Ext = "dylib"; DebugExt = $null; Prefix = "lib"; Zigbuild = $true },
   @{ Triple = "x86_64-unknown-linux-gnu"; Ext = "so"; DebugExt = "dwp"; Prefix = "lib"; Zigbuild = $true },
   @{ Triple = "aarch64-unknown-linux-gnu"; Ext = "so"; DebugExt = "dwp"; Prefix = "lib"; Zigbuild = $true }
