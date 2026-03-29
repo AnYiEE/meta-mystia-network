@@ -1,6 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <TargetFramework>net6.0</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
     <OutputType>Library</OutputType>
     <LangVersion>14</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -14,15 +19,21 @@
   </ItemGroup>
   <Target Name="BuildAndCopyRust" BeforeTargets="Build">
     <!-- invoke cargo and copy resulting library into output directory -->
-    <Exec Command="cargo build --release --manifest-path ..\Cargo.toml" />
+    <Exec Command="cargo build --release --manifest-path $(MSBuildThisFileDirectory)../Cargo.toml" />
     <ItemGroup>
-      <NativeLib Include="..\target\release\meta_mystia_network.*" />
+      <NativeLib
+        Include="$(MSBuildThisFileDirectory)../target/release/*meta_mystia_network.dll;$(MSBuildThisFileDirectory)../target/release/*meta_mystia_network.dylib;$(MSBuildThisFileDirectory)../target/release/*meta_mystia_network.so;$(MSBuildThisFileDirectory)../target/release/*meta_mystia_network.pdb" />
     </ItemGroup>
     <Copy SourceFiles="@(NativeLib)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
   </Target>
-  <ItemGroup>
-    <PackageReference Include="xunit" Version="2.4.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.5" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.6.3" />
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+  </ItemGroup>
+  <ItemGroup Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
   </ItemGroup>
 </Project>
