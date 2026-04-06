@@ -5,13 +5,19 @@
     Build meta-mystia-network for all target platforms and feature configurations.
 .DESCRIPTION
     Builds both default and logging variants for:
-      - x86_64-pc-windows-msvc / x86_64-pc-windows-gnu
-      - aarch64-pc-windows-msvc / aarch64-pc-windows-gnullvm
+      - x86_64-pc-windows-msvc    (native or via cargo-xwin)
+      - aarch64-pc-windows-msvc   (native or via cargo-xwin)
       - universal2-apple-darwin   (via cargo-zigbuild)
       - x86_64-unknown-linux-gnu  (via cargo-zigbuild)
       - aarch64-unknown-linux-gnu (via cargo-zigbuild)
-    On Windows hosts, MSVC toolchain is used for Windows targets.
-    On non-Windows hosts (macOS/Linux), gnu/gnullvm toolchain is used for Windows targets.
+    On Windows hosts, native MSVC toolchain is used for Windows targets.
+    On non-Windows hosts (macOS/Linux), cargo-xwin is used for Windows MSVC targets.
+
+    Note: On non-Windows hosts, thunk-rs (VC-LTL5 + YY-Thunks) and winres are
+    skipped due to lld-link symbol conflicts and lack of rc.exe respectively.
+    Cross-compiled Windows DLLs require Windows 10+, while native Windows builds
+    support Windows 7+ via YY-Thunks API polyfills.
+
     All artifacts are collected into the ./target/output directory with unified naming.
 #>
 
@@ -20,29 +26,25 @@ $ErrorActionPreference = "Stop"
 $LibName = "meta_mystia_network"
 $OutputDir = Join-Path $PSScriptRoot "target" "output"
 
-# Detect host OS and choose Windows target ABI and build tool
+# Detect host OS and choose Windows build tool
+# Both paths target MSVC; on non-Windows hosts cargo-xwin provides the SDK/CRT.
 if ($IsWindows) {
-  $WinX64 = "x86_64-pc-windows-msvc"
-  $WinArm = "aarch64-pc-windows-msvc"
-  $WinDebugExt = "pdb"
-  $WinZigbuild = $false
+  $WinBuildTool = "cargo"       # native MSVC toolchain
 }
 else {
-  # aarch64-pc-windows-gnu is not available on non-Windows hosts,
-  # so x86_64 uses gnu and aarch64 uses gnullvm; both via cargo-zigbuild
-  $WinX64 = "x86_64-pc-windows-gnu"
-  $WinArm = "aarch64-pc-windows-gnullvm"
-  $WinDebugExt = $null
-  $WinZigbuild = $true
+  $WinBuildTool = "xwin"        # cargo-xwin cross-compilation
 }
+$WinX64 = "x86_64-pc-windows-msvc"
+$WinArm = "aarch64-pc-windows-msvc"
 
 # Target definitions
+# BuildTool: "cargo" = native cargo build, "zigbuild" = cargo-zigbuild, "xwin" = cargo xwin build
 $Targets = @(
-  @{ Triple = $WinX64; Ext = "dll"; DebugExt = $WinDebugExt; Prefix = ""; Zigbuild = $WinZigbuild },
-  @{ Triple = $WinArm; Ext = "dll"; DebugExt = $WinDebugExt; Prefix = ""; Zigbuild = $WinZigbuild },
-  @{ Triple = "universal2-apple-darwin"; Ext = "dylib"; DebugExt = $null; Prefix = "lib"; Zigbuild = $true },
-  @{ Triple = "x86_64-unknown-linux-gnu"; Ext = "so"; DebugExt = "dwp"; Prefix = "lib"; Zigbuild = $true },
-  @{ Triple = "aarch64-unknown-linux-gnu"; Ext = "so"; DebugExt = "dwp"; Prefix = "lib"; Zigbuild = $true }
+  @{ Triple = $WinX64; Ext = "dll"; DebugExt = "pdb"; Prefix = ""; BuildTool = $WinBuildTool },
+  @{ Triple = $WinArm; Ext = "dll"; DebugExt = "pdb"; Prefix = ""; BuildTool = $WinBuildTool },
+  @{ Triple = "universal2-apple-darwin"; Ext = "dylib"; DebugExt = $null; Prefix = "lib"; BuildTool = "zigbuild" },
+  @{ Triple = "x86_64-unknown-linux-gnu"; Ext = "so"; DebugExt = "dwp"; Prefix = "lib"; BuildTool = "zigbuild" },
+  @{ Triple = "aarch64-unknown-linux-gnu"; Ext = "so"; DebugExt = "dwp"; Prefix = "lib"; BuildTool = "zigbuild" }
 )
 
 # Feature variants
@@ -69,13 +71,19 @@ foreach ($target in $Targets) {
     # Build arguments
     $buildArgs = @("--release", "--target", $triple) + $variant.Features
 
-    if ($target.Zigbuild) {
-      Write-Host "cargo zigbuild $($buildArgs -join ' ')" -ForegroundColor Yellow
-      & cargo zigbuild @buildArgs
-    }
-    else {
-      Write-Host "cargo build $($buildArgs -join ' ')" -ForegroundColor Yellow
-      & cargo build @buildArgs
+    switch ($target.BuildTool) {
+      "zigbuild" {
+        Write-Host "cargo zigbuild $($buildArgs -join ' ')" -ForegroundColor Yellow
+        & cargo zigbuild @buildArgs
+      }
+      "xwin" {
+        Write-Host "cargo xwin build $($buildArgs -join ' ')" -ForegroundColor Yellow
+        & cargo xwin build @buildArgs
+      }
+      default {
+        Write-Host "cargo build $($buildArgs -join ' ')" -ForegroundColor Yellow
+        & cargo build @buildArgs
+      }
     }
 
     if ($LASTEXITCODE -ne 0) {

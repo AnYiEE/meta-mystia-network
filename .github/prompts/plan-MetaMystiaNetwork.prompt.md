@@ -201,17 +201,15 @@ graph TD
 
 ## 跨平台支持
 
-| 平台              | 产物名称                       | 验证工具            |
-| ----------------- | ------------------------------ | ------------------- |
-| Windows (msvc)    | `meta_mystia_network.dll`      | `dumpbin /exports`  |
-| Windows (gnu)     | `meta_mystia_network.dll`      | `dumpbin /exports`  |
-| Windows (gnullvm) | `meta_mystia_network.dll`      | `dumpbin /exports`  |
-| macOS             | `libmeta_mystia_network.dylib` | `nm -gU` / `otool`  |
-| Linux             | `libmeta_mystia_network.so`    | `nm -D` / `readelf` |
+| 平台           | 产物名称                       | 验证工具            |
+| -------------- | ------------------------------ | ------------------- |
+| Windows (msvc) | `meta_mystia_network.dll`      | `dumpbin /exports`  |
+| macOS          | `libmeta_mystia_network.dylib` | `nm -gU` / `otool`  |
+| Linux          | `libmeta_mystia_network.so`    | `nm -D` / `readelf` |
 
 **平台差异注意事项：**
 
-- **Windows 交叉编译**：在非 Windows 宿主（macOS / Linux）上，x86_64 使用 GNU ABI（`x86_64-pc-windows-gnu`），aarch64 使用 gnullvm（`aarch64-pc-windows-gnullvm`），均通过 `cargo zigbuild` 交叉编译，无需 MSVC 工具链或 MinGW 安装。`thunk-rs` 和 `winres`（Windows 资源嵌入）仅在 Windows 宿主上编译和使用。
+- **Windows 交叉编译**：在非 Windows 宿主（macOS / Linux）上，x86_64 和 aarch64 均使用 MSVC ABI（`x86_64-pc-windows-msvc` / `aarch64-pc-windows-msvc`），通过 `cargo-xwin`（`cargo xwin build`）交叉编译。`thunk-rs`（VC-LTL5 + YY-Thunks，Win7 兼容）和 `winres`（Windows 资源嵌入）仅在 Windows 宿主上编译和使用，因为 YY-Thunks 与 cargo-xwin 使用的 `lld-link` 存在符号冲突，而 `winres` 依赖 `rc.exe` 资源编译器。因此交叉编译产物需要 **Windows 10+**，而原生构建产物支持 **Windows 7+**。
 
 - **TCP Keep-alive（可配置）**：`keepalive_time_secs`、`keepalive_interval_secs`、`keepalive_retries` 均由 `NetworkConfig` 字段控制，默认值 60/10/3。其中 `TCP_KEEPCNT`（重试次数）在 Windows 上不可直接设置，仅 macOS/Linux 支持。代码在 Windows 上跳过此设置而非报错。
 - **mDNS**：macOS 原生支持 Bonjour，Windows 依赖 `mdns-sd` crate 的多播 UDP 实现，两者行为一致但需分别测试。

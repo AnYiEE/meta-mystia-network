@@ -1,4 +1,14 @@
 fn main() {
+    // thunk-rs (VC-LTL5 + YY-Thunks for Win7 compat) and winres (Windows resource embedding)
+    // are only usable on Windows hosts:
+    //   - YY-Thunks introduces delay-load import symbols that conflict with lld-link
+    //     (used by cargo-xwin), causing duplicate symbol errors.
+    //   - winres requires rc.exe (MSVC) or windres (MinGW), unavailable on macOS/Linux.
+    // When cross-compiling via cargo-xwin, these features are skipped, which means:
+    //   - No VC-LTL5 (smaller CRT) or YY-Thunks (Win7 API polyfills)
+    //   - The resulting DLL requires Windows 10+ (uses WaitOnAddress, ProcessPrng, etc.)
+    //   - No embedded Windows version/resource information
+    // Native Windows builds retain full Win7+ support via thunk-rs.
     #[cfg(windows)]
     {
         let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

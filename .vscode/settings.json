@@ -55,6 +55,7 @@
     "openraft",
     "otool",
     "PEERCOUNT",
+    "Prng",
     "reinit",
     "repr",
     "rlib",
@@ -65,8 +66,10 @@
     "unihelper",
     "usize",
     "varint",
+    "windres",
     "winres",
     "xunit",
+    "xwin",
     "zigbuild"
   ]
 }
