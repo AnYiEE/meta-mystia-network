@@ -213,7 +213,7 @@ namespace MetaMystiaNetworkBindings
   /// <para>
   /// The field layout is <c>#[repr(C)]</c>-compatible with the Rust struct.
   /// <b>Do not reorder fields or change types</b> without also updating the Rust
-  /// side. The struct occupies exactly 40 bytes:
+  /// side. The struct occupies exactly 44 bytes (44 data, 0 padding):
   /// </para>
   /// <code>
   ///  offset  0  reconnect_max_ms             u32  (4 B)
@@ -224,20 +224,22 @@ namespace MetaMystiaNetworkBindings
   ///  offset 16  election_timeout_max_ms      u16  (2 B)
   ///  offset 18  reconnect_initial_ms         u16  (2 B)
   ///  offset 20  handshake_timeout_ms         u16  (2 B)
-  ///  offset 22  send_queue_capacity          u16  (2 B)
-  ///  offset 24  max_connections              u16  (2 B)
-  ///  offset 26  keepalive_time_secs          u16  (2 B)
-  ///  offset 28  keepalive_interval_secs      u16  (2 B)
-  ///  offset 30  mdns_port                    u16  (2 B)
-  ///  offset 32  heartbeat_timeout_multiplier u8   (1 B)
-  ///  offset 33  keepalive_retries            u8   (1 B)
-  ///  offset 34  centralized_auto_forward     u8   (1 B)
-  ///  offset 35  auto_election_enabled        u8   (1 B)
-  ///  offset 36  manual_override_recovery     u8   (1 B)
-  ///  offset 37  tcp_nodelay                  u8   (1 B)
-  ///  offset 38  auto_reconnect_enabled       u8   (1 B)
-  ///  offset 39  reconnect_max_retries        u8   (1 B)
-  ///  sizeof = 40
+  ///  offset 22  write_timeout_ms             u16  (2 B)
+  ///  offset 24  send_queue_capacity          u16  (2 B)
+  ///  offset 26  incoming_queue_capacity      u16  (2 B)
+  ///  offset 28  max_connections              u16  (2 B)
+  ///  offset 30  keepalive_time_secs          u16  (2 B)
+  ///  offset 32  keepalive_interval_secs      u16  (2 B)
+  ///  offset 34  mdns_port                    u16  (2 B)
+  ///  offset 36  heartbeat_timeout_multiplier u8   (1 B)
+  ///  offset 37  keepalive_retries            u8   (1 B)
+  ///  offset 38  centralized_auto_forward     u8   (1 B)
+  ///  offset 39  auto_election_enabled        u8   (1 B)
+  ///  offset 40  manual_override_recovery     u8   (1 B)
+  ///  offset 41  tcp_nodelay                  u8   (1 B)
+  ///  offset 42  auto_reconnect_enabled       u8   (1 B)
+  ///  offset 43  reconnect_max_retries        u8   (1 B)
+  ///  sizeof = 44
   /// </code>
   /// </remarks>
   [StructLayout(LayoutKind.Sequential)]
@@ -284,11 +286,25 @@ namespace MetaMystiaNetworkBindings
     public ushort handshake_timeout_ms;
 
     /// <summary>
+    /// Timeout (ms) for each TCP write operation in the write task.
+    /// Prevents TCP zero-window from blocking the write loop indefinitely.
+    /// Must be > 0. Default: 5000.
+    /// </summary>
+    public ushort write_timeout_ms;
+
+    /// <summary>
     /// Capacity of each peer's outbound send queue (packets). Must be > 0.
     /// Exceeding the capacity returns <see cref="NetErrorCode.SendQueueFull"/>.
     /// Default: 128.
     /// </summary>
     public ushort send_queue_capacity;
+
+    /// <summary>
+    /// Capacity of the incoming message queue (mpsc channel buffer).
+    /// When full, the data channel read task waits up to <see cref="write_timeout_ms"/>
+    /// before disconnecting the peer. Must be > 0. Default: 256.
+    /// </summary>
+    public ushort incoming_queue_capacity;
 
     /// <summary>
     /// Maximum number of simultaneous TCP connections. Must be > 0.
@@ -385,7 +401,9 @@ namespace MetaMystiaNetworkBindings
       election_timeout_max_ms = 3000,
       reconnect_initial_ms = 1000,
       handshake_timeout_ms = 5000,
+      write_timeout_ms = 5000,
       send_queue_capacity = 128,
+      incoming_queue_capacity = 256,
       max_connections = 64,
       keepalive_time_secs = 60,
       keepalive_interval_secs = 10,

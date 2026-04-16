@@ -64,6 +64,14 @@
 | `test_auto_reconnect_toggle`                                  | `set_auto_reconnect` / `is_auto_reconnect_enabled` 往返切换            |
 | `test_auto_reconnect_config_disabled`                         | 配置 `auto_reconnect_enabled=false` 时初始状态为禁用                   |
 | `test_reconnect_max_retries_config`                           | 配置 `reconnect_max_retries` 值被正确接受                              |
+| **TCP Zero Window 防护**                                      |                                                                        |
+| `test_write_timeout_ms_default_in_config`                     | `write_timeout_ms` 默认值为 5000 且配置验证通过                        |
+| `test_write_timeout_ms_validation`                            | `write_timeout_ms = 0` 时 `validate()` 返回错误                        |
+| `test_write_timeout_disconnects_stalled_peer`                 | write task TCP 写入超时后断开连接                                      |
+| `test_ffi_write_timeout_roundtrip`                            | FFI `write_timeout_ms` 字段 → `NetworkConfig` 转换正确                 |
+| `test_incoming_queue_full_disconnects_data_channel`           | 数据通道 incoming 队列满时超时断连，控制通道不受影响                   |
+| `test_incoming_queue_capacity_default`                        | `incoming_queue_capacity` 默认值为 256 且配置验证通过                  |
+| `test_incoming_queue_capacity_validation`                     | `incoming_queue_capacity = 0` 时 `validate()` 返回错误                 |
 | **选举**                                                      |                                                                        |
 | `test_initial_state`                                          | LeaderElection 初始状态（Follower, term=0, 无 leader）                 |
 | `test_start_election_single_node`                             | 单节点自动选举立即成为 Leader                                          |
@@ -129,7 +137,7 @@
 | `test_ffi_error_codes_not_initialized`                        | 未初始化时调用 FFI 返回正确错误码                                      |
 | `test_ffi_full_lifecycle`                                     | FFI 完整生命周期：initialize→connect→send→shutdown                     |
 | `test_ffi_tcp_nodelay_roundtrip`                              | FFI `tcp_nodelay` 字段 0/1 → `NetworkConfig::tcp_nodelay` bool 转换    |
-| `test_ffi_config_size_unchanged`                              | `NetworkConfigFFI` 结构体大小保持 40 字节                              |
+| `test_ffi_config_size_unchanged`                              | `NetworkConfigFFI` 结构体大小保持 44 字节                              |
 | `test_keepalive_defaults`                                     | 默认 keepalive 配置值为 60/10/3                                        |
 | `test_keepalive_validation`                                   | keepalive 字段为 0 时校验失败                                          |
 | `test_ffi_keepalive_roundtrip`                                | FFI keepalive 字段往返映射正确                                         |
@@ -234,3 +242,4 @@ async fn wait_until(f: impl Fn() -> bool, timeout_ms: u64) -> bool {
 | `test_mdns_race_connect_then_manual`          | `e2e_mdns_race_connect_then_manual`    | mDNS 自动连接后手动 ConnectTo 返回 AlreadyConnected（非致命） |
 | `test_election_skips_known_leader`            | `e2e_election_skips_known_leader`      | 已知 leader 时选举 term 稳定不变，无多余选举                  |
 | `test_manual_leader_survives_heartbeat`       | `e2e_manual_leader_survives_heartbeat` | 手动 SetLeader 后节点拒绝外部高 term 心跳，不被覆盖           |
+| `test_incoming_queue_full_does_not_block`     | `e2e_incoming_queue_pressure`          | incoming 队列满时 read task 不阻塞，连接存活                  |

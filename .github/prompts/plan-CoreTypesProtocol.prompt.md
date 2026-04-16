@@ -84,10 +84,14 @@ pub struct NetworkConfig {
     pub reconnect_initial_ms: u16,
     /// TCP 握手超时（ms），默认 5000
     pub handshake_timeout_ms: u16,
+    /// TCP 写超时（ms），write task 单次 framed.send() 的最大等待时间，防止 TCP zero window 导致无限阻塞，默认 5000
+    pub write_timeout_ms: u16,
 
     // --- u16 capacity/keepalive ---
     /// 发送队列最大长度，默认 128
     pub send_queue_capacity: usize,
+    /// incoming 消息队列容量，默认 256，允许按场景调整缓冲区大小
+    pub incoming_queue_capacity: usize,
     /// 最大同时连接数，防止资源耗尽，默认 64
     pub max_connections: usize,
     /// TCP Keep-alive 空闲时间（秒），空闲多久后发送首个探测包，默认 60
@@ -131,7 +135,9 @@ impl Default for NetworkConfig {
             election_timeout_max_ms: 3000,
             reconnect_initial_ms: 1000,
             handshake_timeout_ms: 5000,
+            write_timeout_ms: 5000,
             send_queue_capacity: 128,
+            incoming_queue_capacity: 256,
             max_connections: 64,
             keepalive_time_secs: 60,
             keepalive_interval_secs: 10,
@@ -152,7 +158,8 @@ impl NetworkConfig {
     /// 验证配置合理性，返回第一个发现的错误。
     /// 约束：heartbeat > 0, election_min > heartbeat, election_min ≤ election_max,
     /// timeout_multiplier > 0, reconnect_initial > 0 且 ≤ reconnect_max（跨类型比较用 u32::from），queue > 0,
-    /// keepalive_time_secs > 0, keepalive_interval_secs > 0, keepalive_retries > 0
+    /// keepalive_time_secs > 0, keepalive_interval_secs > 0, keepalive_retries > 0,
+    /// write_timeout_ms > 0, incoming_queue_capacity > 0
     pub fn validate(&self) -> Result<(), NetworkError> { /* 逐项检查上述约束 */ }
 }
 ```
@@ -385,7 +392,7 @@ impl NetworkError {
 
 ## 实现映射（关键常量与 FFI 相关项）
 
-- **NetworkConfigFFI**：位于 `src/ffi.rs` 的 `NetworkConfigFFI` 与本模块的 `NetworkConfig` 通过 `impl From<&NetworkConfigFFI> for NetworkConfig` 映射（字段一一对应，offset 38-39 为 `auto_reconnect_enabled` 和 `reconnect_max_retries`）。
+- **NetworkConfigFFI**：位于 `src/ffi.rs` 的 `NetworkConfigFFI` 与本模块的 `NetworkConfig` 通过 `impl From<&NetworkConfigFFI> for NetworkConfig` 映射（字段一一对应，offset 42-43 为 `auto_reconnect_enabled` 和 `reconnect_max_retries`）。
 - **错误码**：`error_codes` 常量定义在 `src/error.rs`，FFI 函数统一返回 `i32` 错误码并可通过 `GetLastErrorCode`/`GetLastErrorMessage` 查询。
 - **消息类型边界**：`msg_types::USER_MESSAGE_START == 0x0100` 为用户消息起点，FFI 与发送接口均在入口处验证该边界（见 `src/ffi.rs` 的 `BroadcastMessage` / `SendToPeer` 调用链）。
 

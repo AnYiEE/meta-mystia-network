@@ -570,25 +570,27 @@ public class NetworkTests
     // 16  election_timeout_max_ms      u16 → 2
     // 18  reconnect_initial_ms         u16 → 2
     // 20  handshake_timeout_ms         u16 → 2
-    // 22  send_queue_capacity          u16 → 2
-    // 24  max_connections              u16 → 2
-    // 26  keepalive_time_secs          u16 → 2
-    // 28  keepalive_interval_secs      u16 → 2
-    // 30  mdns_port                    u16 → 2
-    // 32  heartbeat_timeout_multiplier u8  → 1
-    // 33  keepalive_retries            u8  → 1
-    // 34  centralized_auto_forward     u8  → 1
-    // 35  auto_election_enabled        u8  → 1
-    // 36  manual_override_recovery     u8  → 1
-    // 37  tcp_nodelay                  u8  → 1
-    // 38  auto_reconnect_enabled       u8  → 1
-    // 39  reconnect_max_retries        u8  → 1
-    // total = 40 bytes
+    // 22  write_timeout_ms             u16 → 2
+    // 24  send_queue_capacity          u16 → 2
+    // 26  incoming_queue_capacity      u16 → 2
+    // 28  max_connections              u16 → 2
+    // 30  keepalive_time_secs          u16 → 2
+    // 32  keepalive_interval_secs      u16 → 2
+    // 34  mdns_port                    u16 → 2
+    // 36  heartbeat_timeout_multiplier u8  → 1
+    // 37  keepalive_retries            u8  → 1
+    // 38  centralized_auto_forward     u8  → 1
+    // 39  auto_election_enabled        u8  → 1
+    // 40  manual_override_recovery     u8  → 1
+    // 41  tcp_nodelay                  u8  → 1
+    // 42  auto_reconnect_enabled       u8  → 1
+    // 43  reconnect_max_retries        u8  → 1
+    // total = 44 bytes (44 data, 0 padding)
     //
-    // C# LayoutKind.Sequential obeys the same rules and also produces 40 bytes.
+    // C# LayoutKind.Sequential obeys the same rules and also produces 44 bytes.
     // If this test fails, a field type or order was changed in a way that breaks
     // the FFI ABI with the Rust side.
-    Assert.Equal(40, Marshal.SizeOf<NetworkConfigFFI>());
+    Assert.Equal(44, Marshal.SizeOf<NetworkConfigFFI>());
   }
 
   // --- 21. ManualOverrideRecovery enum values ----------------------------
@@ -1477,7 +1479,7 @@ public class NetworkTests
         return line[prefix.Length..];
       Thread.Sleep(50);
     }
-    Assert.True(false, $"Timed out waiting for stdout line with prefix '{prefix}'");
+    Assert.Fail($"Timed out waiting for stdout line with prefix '{prefix}'");
     return string.Empty; // unreachable
   }
 
@@ -1493,7 +1495,7 @@ public class NetworkTests
       if (condition()) return;
       Thread.Sleep(50);
     }
-    Assert.True(false, message);
+    Assert.Fail(message);
   }
 
   // --- helpers ---------------------------------------------------------

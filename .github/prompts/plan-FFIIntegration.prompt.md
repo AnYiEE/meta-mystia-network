@@ -116,7 +116,7 @@ static LAST_RETURNED_STRING: Mutex<Option<CString>> = Mutex::new(None);
 
 #### NetworkConfigFFI
 
-字段按对齐大小降序排列（u32 → u16 → u8），`#[repr(C)]` 布局（总大小 40 字节）：
+字段按对齐大小降序排列（u32 → u16 → u8），`#[repr(C)]` 布局（总大小 44 字节，自然 4 字节对齐，无尾部填充）：
 
 ```rust
 #[repr(C)]
@@ -130,24 +130,26 @@ pub struct NetworkConfigFFI {
     pub election_timeout_max_ms: u16,      // offset 16
     pub reconnect_initial_ms: u16,         // offset 18
     pub handshake_timeout_ms: u16,         // offset 20
-    pub send_queue_capacity: u16,          // offset 22
-    pub max_connections: u16,              // offset 24
-    pub keepalive_time_secs: u16,          // offset 26 — 空闲多久发首个探测（秒），默认 60
-    pub keepalive_interval_secs: u16,      // offset 28 — 探测间隔（秒），默认 10
-    pub mdns_port: u16,                    // offset 30
+    pub write_timeout_ms: u16,             // offset 22 — TCP 写超时（ms），防止 zero window 阻塞，默认 5000
+    pub send_queue_capacity: u16,          // offset 24
+    pub incoming_queue_capacity: u16,      // offset 26 — incoming 消息队列容量，默认 256
+    pub max_connections: u16,              // offset 28
+    pub keepalive_time_secs: u16,          // offset 30 — 空闲多久发首个探测（秒），默认 60
+    pub keepalive_interval_secs: u16,      // offset 32 — 探测间隔（秒），默认 10
+    pub mdns_port: u16,                    // offset 34
 
-    pub heartbeat_timeout_multiplier: u8,  // offset 32
-    pub keepalive_retries: u8,             // offset 33 — 探测重试次数，默认 3（Windows 忽略）
-    pub centralized_auto_forward: u8,      // offset 34
-    pub auto_election_enabled: u8,         // offset 35
-    pub manual_override_recovery: u8,      // offset 36 — 0=Hold, 1=AutoElect
-    pub tcp_nodelay: u8,                   // offset 37 — 0=Nagle enabled, 1=Nagle disabled
-    pub auto_reconnect_enabled: u8,        // offset 38 — 0=禁用自动重连, 1=启用（默认 1）
-    pub reconnect_max_retries: u8,         // offset 39 — 最大重连次数，0=无限（默认 0）
-}   // sizeof = 40
+    pub heartbeat_timeout_multiplier: u8,  // offset 36
+    pub keepalive_retries: u8,             // offset 37 — 探测重试次数，默认 3（Windows 忽略）
+    pub centralized_auto_forward: u8,      // offset 38
+    pub auto_election_enabled: u8,         // offset 39
+    pub manual_override_recovery: u8,      // offset 40 — 0=Hold, 1=AutoElect
+    pub tcp_nodelay: u8,                   // offset 41 — 0=Nagle enabled, 1=Nagle disabled
+    pub auto_reconnect_enabled: u8,        // offset 42 — 0=禁用自动重连, 1=启用（默认 1）
+    pub reconnect_max_retries: u8,         // offset 43 — 最大重连次数，0=无限（默认 0）
+}   // sizeof = 44 (44 data, 0 padding — naturally 4-byte aligned)
 ```
 
-C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u32→uint`，`u16→ushort`，`u8→byte`。keepalive 三字段中 `keepalive_time_secs`/`keepalive_interval_secs` 对应 C# `ushort`，`keepalive_retries` 对应 C# `byte`（Windows 上被忽略）。`auto_reconnect_enabled` 和 `reconnect_max_retries` 对应 C# `byte`。
+C# 侧用 `[StructLayout(LayoutKind.Sequential)]`，`u32→uint`，`u16→ushort`，`u8→byte`。keepalive 三字段中 `keepalive_time_secs`/`keepalive_interval_secs` 对应 C# `ushort`，`keepalive_retries` 对应 C# `byte`（Windows 上被忽略）。`auto_reconnect_enabled` 和 `reconnect_max_retries` 对应 C# `byte`。`incoming_queue_capacity` 对应 C# `ushort`（默认 256）。
 
 `InitializeNetworkWithConfig` 先转换为 `NetworkConfig`，再调 `config.validate()` 验证参数。
 
@@ -240,7 +242,7 @@ fn return_string(s: String) -> *const c_char {
 ## Verification
 
 - 所有 FFI 函数有 `catch_unwind`，无 `bool` 跨边界
-- `NetworkConfigFFI` 大小为 40 字节（零隐式 padding，offset 38-39 为 `auto_reconnect_enabled` 和 `reconnect_max_retries`，4 字节对齐；keepalive 三字段位于 offset 26/28/33）
+- `NetworkConfigFFI` 大小为 44 字节（44 字节数据，自然 4 字节对齐无填充；`write_timeout_ms` 位于 offset 22，`incoming_queue_capacity` 位于 offset 26，keepalive 三字段位于 offset 30/32/37）
 - Shutdown 顺序：PeerLeave → drain → cancel → discovery → drain_callback → transport → join_callback_thread → destroy Runtime
 - Shutdown 后可再次 Initialize
 - `error_codes` 从 `error.rs` 导入

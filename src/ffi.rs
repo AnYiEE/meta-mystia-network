@@ -89,7 +89,7 @@ where
 /// the Rust `NetworkConfig` and groups fields by descending alignment
 /// (u32 → u16 → u8) to eliminate implicit padding.
 ///
-/// # Layout (40 bytes, 4-byte aligned)
+/// # Layout (44 bytes, 4-byte aligned, 0 padding)
 ///
 /// ```text
 /// offset  0  reconnect_max_ms             u32  (4 B)
@@ -100,20 +100,22 @@ where
 /// offset 16  election_timeout_max_ms      u16  (2 B)
 /// offset 18  reconnect_initial_ms         u16  (2 B)
 /// offset 20  handshake_timeout_ms         u16  (2 B)
-/// offset 22  send_queue_capacity          u16  (2 B)
-/// offset 24  max_connections              u16  (2 B)
-/// offset 26  keepalive_time_secs          u16  (2 B)
-/// offset 28  keepalive_interval_secs      u16  (2 B)
-/// offset 30  mdns_port                    u16  (2 B)
-/// offset 32  heartbeat_timeout_multiplier u8   (1 B)
-/// offset 33  keepalive_retries            u8   (1 B)
-/// offset 34  centralized_auto_forward     u8   (1 B)
-/// offset 35  auto_election_enabled        u8   (1 B)
-/// offset 36  manual_override_recovery     u8   (1 B)
-/// offset 37  tcp_nodelay                  u8   (1 B)
-/// offset 38  auto_reconnect_enabled       u8   (1 B)
-/// offset 39  reconnect_max_retries        u8   (1 B)
-/// sizeof = 40
+/// offset 22  write_timeout_ms             u16  (2 B)
+/// offset 24  send_queue_capacity          u16  (2 B)
+/// offset 26  incoming_queue_capacity      u16  (2 B)
+/// offset 28  max_connections              u16  (2 B)
+/// offset 30  keepalive_time_secs          u16  (2 B)
+/// offset 32  keepalive_interval_secs      u16  (2 B)
+/// offset 34  mdns_port                    u16  (2 B)
+/// offset 36  heartbeat_timeout_multiplier u8   (1 B)
+/// offset 37  keepalive_retries            u8   (1 B)
+/// offset 38  centralized_auto_forward     u8   (1 B)
+/// offset 39  auto_election_enabled        u8   (1 B)
+/// offset 40  manual_override_recovery     u8   (1 B)
+/// offset 41  tcp_nodelay                  u8   (1 B)
+/// offset 42  auto_reconnect_enabled       u8   (1 B)
+/// offset 43  reconnect_max_retries        u8   (1 B)
+/// sizeof = 44
 /// ```
 #[repr(C)]
 pub struct NetworkConfigFFI {
@@ -129,8 +131,12 @@ pub struct NetworkConfigFFI {
     pub reconnect_initial_ms: u16,
     pub handshake_timeout_ms: u16,
 
+    // u16 write timeout for TCP zero-window protection
+    pub write_timeout_ms: u16,
+
     // u16 capacity / keepalive / discovery
     pub send_queue_capacity: u16,
+    pub incoming_queue_capacity: u16,
     pub max_connections: u16,
     pub keepalive_time_secs: u16,
     pub keepalive_interval_secs: u16,
@@ -168,7 +174,9 @@ impl From<&NetworkConfigFFI> for NetworkConfig {
             election_timeout_max_ms: ffi.election_timeout_max_ms,
             reconnect_initial_ms: ffi.reconnect_initial_ms,
             handshake_timeout_ms: ffi.handshake_timeout_ms,
+            write_timeout_ms: ffi.write_timeout_ms,
             send_queue_capacity: ffi.send_queue_capacity as usize,
+            incoming_queue_capacity: ffi.incoming_queue_capacity as usize,
             max_connections: ffi.max_connections as usize,
             keepalive_time_secs: ffi.keepalive_time_secs,
             keepalive_interval_secs: ffi.keepalive_interval_secs,

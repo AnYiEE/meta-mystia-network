@@ -990,7 +990,9 @@ mod tests {
             election_timeout_max_ms: d.election_timeout_max_ms,
             reconnect_initial_ms: d.reconnect_initial_ms,
             handshake_timeout_ms: d.handshake_timeout_ms,
+            write_timeout_ms: d.write_timeout_ms,
             send_queue_capacity: 512, // intentionally non-default
+            incoming_queue_capacity: d.incoming_queue_capacity as u16,
             max_connections: d.max_connections as u16,
             keepalive_time_secs: d.keepalive_time_secs,
             keepalive_interval_secs: d.keepalive_interval_secs,
@@ -4365,7 +4367,9 @@ mod tests {
             election_timeout_max_ms: d.election_timeout_max_ms,
             reconnect_initial_ms: d.reconnect_initial_ms,
             handshake_timeout_ms: d.handshake_timeout_ms,
+            write_timeout_ms: d.write_timeout_ms,
             send_queue_capacity: d.send_queue_capacity as u16,
+            incoming_queue_capacity: d.incoming_queue_capacity as u16,
             max_connections: d.max_connections as u16,
             keepalive_time_secs: d.keepalive_time_secs,
             keepalive_interval_secs: d.keepalive_interval_secs,
@@ -4395,8 +4399,8 @@ mod tests {
     fn test_ffi_config_size_unchanged() {
         assert_eq!(
             std::mem::size_of::<crate::ffi::NetworkConfigFFI>(),
-            40,
-            "NetworkConfigFFI must remain 40 bytes for ABI compatibility"
+            44,
+            "NetworkConfigFFI must remain 44 bytes for ABI compatibility"
         );
     }
 
@@ -4445,7 +4449,9 @@ mod tests {
             election_timeout_max_ms: d.election_timeout_max_ms,
             reconnect_initial_ms: d.reconnect_initial_ms,
             handshake_timeout_ms: d.handshake_timeout_ms,
+            write_timeout_ms: d.write_timeout_ms,
             send_queue_capacity: d.send_queue_capacity as u16,
+            incoming_queue_capacity: d.incoming_queue_capacity as u16,
             max_connections: d.max_connections as u16,
             keepalive_time_secs: 30,
             keepalive_interval_secs: 5,
@@ -4464,6 +4470,76 @@ mod tests {
         assert_eq!(cfg.keepalive_time_secs, 30);
         assert_eq!(cfg.keepalive_interval_secs, 5);
         assert_eq!(cfg.keepalive_retries, 5);
+    }
+
+    #[test]
+    fn test_ffi_write_timeout_roundtrip() {
+        use crate::ffi::NetworkConfigFFI;
+
+        let d = NetworkConfig::default();
+        let ffi = NetworkConfigFFI {
+            reconnect_max_ms: d.reconnect_max_ms,
+            compression_threshold: d.compression_threshold,
+            max_message_size: d.max_message_size,
+            heartbeat_interval_ms: d.heartbeat_interval_ms,
+            election_timeout_min_ms: d.election_timeout_min_ms,
+            election_timeout_max_ms: d.election_timeout_max_ms,
+            reconnect_initial_ms: d.reconnect_initial_ms,
+            handshake_timeout_ms: d.handshake_timeout_ms,
+            write_timeout_ms: 3000,
+            send_queue_capacity: d.send_queue_capacity as u16,
+            incoming_queue_capacity: d.incoming_queue_capacity as u16,
+            max_connections: d.max_connections as u16,
+            keepalive_time_secs: d.keepalive_time_secs,
+            keepalive_interval_secs: d.keepalive_interval_secs,
+            mdns_port: d.mdns_port,
+            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
+            keepalive_retries: d.keepalive_retries,
+            centralized_auto_forward: 1,
+            auto_election_enabled: 1,
+            manual_override_recovery: 0,
+            tcp_nodelay: 0,
+            auto_reconnect_enabled: 1,
+            reconnect_max_retries: 0,
+        };
+
+        let cfg = NetworkConfig::from(&ffi);
+        assert_eq!(cfg.write_timeout_ms, 3000);
+    }
+
+    #[test]
+    fn test_ffi_incoming_queue_capacity_roundtrip() {
+        use crate::ffi::NetworkConfigFFI;
+
+        let d = NetworkConfig::default();
+        let ffi = NetworkConfigFFI {
+            reconnect_max_ms: d.reconnect_max_ms,
+            compression_threshold: d.compression_threshold,
+            max_message_size: d.max_message_size,
+            heartbeat_interval_ms: d.heartbeat_interval_ms,
+            election_timeout_min_ms: d.election_timeout_min_ms,
+            election_timeout_max_ms: d.election_timeout_max_ms,
+            reconnect_initial_ms: d.reconnect_initial_ms,
+            handshake_timeout_ms: d.handshake_timeout_ms,
+            write_timeout_ms: d.write_timeout_ms,
+            send_queue_capacity: d.send_queue_capacity as u16,
+            incoming_queue_capacity: 512,
+            max_connections: d.max_connections as u16,
+            keepalive_time_secs: d.keepalive_time_secs,
+            keepalive_interval_secs: d.keepalive_interval_secs,
+            mdns_port: d.mdns_port,
+            heartbeat_timeout_multiplier: d.heartbeat_timeout_multiplier,
+            keepalive_retries: d.keepalive_retries,
+            centralized_auto_forward: 1,
+            auto_election_enabled: 1,
+            manual_override_recovery: 0,
+            tcp_nodelay: 0,
+            auto_reconnect_enabled: 1,
+            reconnect_max_retries: 0,
+        };
+
+        let cfg = NetworkConfig::from(&ffi);
+        assert_eq!(cfg.incoming_queue_capacity, 512);
     }
 
     #[tokio::test]

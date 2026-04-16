@@ -62,10 +62,20 @@ pub struct NetworkConfig {
     pub reconnect_initial_ms: u16,
     /// timeout (ms) to complete the TCP handshake exchange
     pub handshake_timeout_ms: u16,
+    /// timeout (ms) for each TCP write operation in the write task.
+    /// prevents TCP zero-window from blocking the write loop
+    /// indefinitely. must be > 0. default: 5000.
+    pub write_timeout_ms: u16,
 
     // --- u16 capacity/keepalive fields -----------------------------------
     /// capacity of each peer's outgoing send queue
     pub send_queue_capacity: usize,
+    /// capacity of the incoming message queue (mpsc channel buffer).
+    /// when the queue is full, the data channel read task will wait
+    /// up to `write_timeout_ms` before disconnecting the peer.
+    /// control channel read task always blocks (never drops).
+    /// must be > 0. default: 256.
+    pub incoming_queue_capacity: usize,
     /// maximum number of simultaneous peer connections. Each peer
     /// uses up to two TCP sockets (control channel + data channel),
     /// so the actual TCP socket count may be up to `2 × max_connections`.
@@ -133,7 +143,9 @@ impl Default for NetworkConfig {
             election_timeout_max_ms: 3000,
             reconnect_initial_ms: 1000,
             handshake_timeout_ms: 5000,
+            write_timeout_ms: 5000,
             send_queue_capacity: 128,
+            incoming_queue_capacity: 256,
             max_connections: 64,
             keepalive_time_secs: 60,
             keepalive_interval_secs: 10,
@@ -177,6 +189,9 @@ impl NetworkConfig {
         if self.send_queue_capacity == 0 {
             return e("send_queue_capacity must be > 0");
         }
+        if self.incoming_queue_capacity == 0 {
+            return e("incoming_queue_capacity must be > 0");
+        }
         if self.max_connections == 0 {
             return e("max_connections must be > 0");
         }
@@ -185,6 +200,9 @@ impl NetworkConfig {
         }
         if self.handshake_timeout_ms == 0 {
             return e("handshake_timeout_ms must be > 0");
+        }
+        if self.write_timeout_ms == 0 {
+            return e("write_timeout_ms must be > 0");
         }
         if self.keepalive_time_secs == 0 {
             return e("keepalive_time_secs must be > 0");
@@ -294,5 +312,33 @@ mod tests {
             cfg.reconnect_max_retries, 0,
             "reconnect_max_retries should default to 0 (unlimited)"
         );
+    }
+
+    #[test]
+    fn test_write_timeout_ms_default_in_config() {
+        let cfg = NetworkConfig::default();
+        assert_eq!(cfg.write_timeout_ms, 5000);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_write_timeout_ms_validation() {
+        let mut config = NetworkConfig::default();
+        config.write_timeout_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_incoming_queue_capacity_default() {
+        let cfg = NetworkConfig::default();
+        assert_eq!(cfg.incoming_queue_capacity, 256);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_incoming_queue_capacity_validation() {
+        let mut config = NetworkConfig::default();
+        config.incoming_queue_capacity = 0;
+        assert!(config.validate().is_err());
     }
 }

@@ -160,7 +160,7 @@ impl TransportManager {
         let listener_addr = listener.local_addr()?;
         tracing::info!(addr = %listener_addr, "TCP listener started");
 
-        let (incoming_tx, incoming_rx) = mpsc::channel(256);
+        let (incoming_tx, incoming_rx) = mpsc::channel(config.incoming_queue_capacity);
 
         let manager = Arc::new(Self {
             local_peer_id,
@@ -651,6 +651,7 @@ impl TransportManager {
         tracing::info!(peer = %peer_id, addr = %peer_addr, "peer connected (control channel)");
 
         let write_cancel = cancel_token.clone();
+        let write_timeout_ms = self.config.write_timeout_ms;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -658,9 +659,19 @@ impl TransportManager {
                     msg = send_rx.recv() => {
                         match msg {
                             Some(packet) => {
-                                if let Err(e) = sink.send(packet).await {
-                                    tracing::warn!(error = %e, "control write task send error");
-                                    break;
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_millis(u64::from(write_timeout_ms)),
+                                    sink.send(packet),
+                                ).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => {
+                                        tracing::warn!(error = %e, "control write task send error");
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!("control write timeout, disconnecting stalled peer");
+                                        break;
+                                    }
                                 }
                             }
                             None => break,
@@ -682,8 +693,10 @@ impl TransportManager {
                     frame = stream.next() => {
                         match frame {
                             Some(Ok(packet)) => {
+                                // Control packets (heartbeat, election, membership)
+                                // must never be dropped — use blocking send.
                                 if incoming_tx.send((read_peer_id.clone(), packet)).await.is_err() {
-                                    break;
+                                    break; // receiver dropped
                                 }
                             }
                             Some(Err(e)) => {
@@ -908,6 +921,7 @@ impl TransportManager {
 
         // Write task for data channel
         let write_cancel = cancel_token.clone();
+        let write_timeout_ms = self.config.write_timeout_ms;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -915,9 +929,19 @@ impl TransportManager {
                     msg = send_rx.recv() => {
                         match msg {
                             Some(packet) => {
-                                if let Err(e) = sink.send(packet).await {
-                                    tracing::warn!(error = %e, "data write task send error");
-                                    break;
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_millis(u64::from(write_timeout_ms)),
+                                    sink.send(packet),
+                                ).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => {
+                                        tracing::warn!(error = %e, "data write task send error");
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!("data write timeout, disconnecting stalled peer");
+                                        break;
+                                    }
                                 }
                             }
                             None => break,
@@ -934,6 +958,7 @@ impl TransportManager {
         let incoming_tx = self.incoming_tx.clone();
         let connections = Arc::clone(&self.connections);
         let cleanup_token = cancel_token.clone();
+        let data_read_timeout_ms = self.config.write_timeout_ms;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -941,8 +966,20 @@ impl TransportManager {
                     frame = stream.next() => {
                         match frame {
                             Some(Ok(packet)) => {
-                                if incoming_tx.send((read_peer_id.clone(), packet)).await.is_err() {
-                                    break;
+                                // Data packets: if the incoming queue is full for
+                                // longer than write_timeout_ms, disconnect. This
+                                // avoids silent packet loss in P2P scenarios and
+                                // lets the reconnection mechanism trigger state resync.
+                                match tokio::time::timeout(
+                                    Duration::from_millis(u64::from(data_read_timeout_ms)),
+                                    incoming_tx.send((read_peer_id.clone(), packet)),
+                                ).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(_)) => break, // receiver dropped
+                                    Err(_) => {
+                                        tracing::warn!(peer = %read_peer_id, "incoming queue full for data channel, disconnecting");
+                                        break;
+                                    }
                                 }
                             }
                             Some(Err(e)) => {

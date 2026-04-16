@@ -102,7 +102,7 @@ impl TransportManager {
         reconnect_event_tx: mpsc::Sender<(PeerId, u8)>,
         shutdown_token: CancellationToken,
     ) -> Result<(Arc<Self>, mpsc::Receiver<(PeerId, RawPacket)>), NetworkError> {
-        let (incoming_tx, incoming_rx) = mpsc::channel(256); // 汇总所有 peer 的入站消息，容量独立于 per-peer send_queue
+        let (incoming_tx, incoming_rx) = mpsc::channel(config.incoming_queue_capacity); // 汇总所有 peer 的入站消息，容量可配置
         // ... 绑定 TCP listener、启动 accept 循环 ...
         Ok((manager, incoming_rx))
     }
@@ -258,6 +258,15 @@ impl Encoder<RawPacket> for PacketCodec {
 - Read task：循环读取并解码消息，通过 channel 发送给消息处理器
 - Write task：从 `mpsc::Receiver<RawPacket>` 接收并发送消息
 
+11. **TCP Zero Window 防护（写超时 + 差异化 incoming 策略）**：
+    - Write task 中的每次 `framed.send()` 使用 `tokio::time::timeout(Duration::from_millis(config.write_timeout_ms))` 包裹
+    - 超时后断开连接（取消 CancellationToken），记录 `warn!` 日志
+    - `write_timeout_ms` 新增至 `NetworkConfig`（u16，默认 5000ms），位于 `handshake_timeout_ms` 之后
+    - **控制通道 read task**：`incoming_tx.send()` 保持阻塞等待（无超时），控制包（心跳/选举/成员变更）永不丢弃
+    - **数据通道 read task**：`incoming_tx.send()` 使用 `write_timeout_ms` 超时，超时后断开数据通道连接（触发自动重连），不丢包
+    - `incoming_queue_capacity` 新增至 `NetworkConfig`（u16，默认 256），`TransportManager::new()` 使用此值创建 incoming channel
+    - 相关计划详见 `plan-TCPZeroWindow`
+
 ---
 
 ## Verification
@@ -280,6 +289,12 @@ impl Encoder<RawPacket> for PacketCodec {
 - **自动重连可通过 `NetworkConfig::auto_reconnect_enabled` 配置**（默认启用），运行时可通过 `set_auto_reconnect` 动态切换
 - **重连最大重试次数可通过 `NetworkConfig::reconnect_max_retries` 配置**（默认 0=无限）
 - **重连生命周期事件通过 `reconnect_event_tx` 通道传递**（0=断开, 1=成功, 2=失败）
+- **Write task 写超时防护**：`write_timeout_ms`（默认 5000ms）保护 write task 不因 TCP zero window 无限阻塞
+- **控制通道 Read task incoming**：阻塞等待，控制包（心跳/选举/成员变更）永不丢弃
+- **数据通道 Read task incoming**：`write_timeout_ms` 超时后断连数据通道（触发消息回退到控制通道），不丢包
+- **Incoming 队列容量可配置**：`incoming_queue_capacity`（默认 256）允许游戏按场景调整缓冲区大小
+- **Write timeout 配置校验**：`validate()` 检查 `write_timeout_ms > 0`
+- **Incoming queue capacity 配置校验**：`validate()` 检查 `incoming_queue_capacity > 0`
 
 ## 实现映射（关键函数/方法）
 

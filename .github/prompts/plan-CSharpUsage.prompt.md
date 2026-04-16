@@ -93,9 +93,9 @@ public struct NetworkEvent
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// 网络配置（与 Rust #[repr(C)] 布局一致，总大小 40 字节）。
+/// 网络配置（与 Rust #[repr(C)] 布局一致，总大小 44 字节，自然 4 字节对齐无填充）。
 /// 用 <see cref="Default"/> 获取默认值后按需修改，传入 InitializeNetworkWithConfig。
-/// 字段按对齐降序排列：3×uint → 10×ushort → 6×byte + 2B padding。
+/// 字段按对齐降序排列：3×uint → 12×ushort → 8×byte。
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct NetworkConfigFFI
@@ -119,8 +119,12 @@ public struct NetworkConfigFFI
     public ushort reconnect_initial_ms;
     /// <summary>握手超时（ms）。默认 5000</summary>
     public ushort handshake_timeout_ms;
+    /// <summary>TCP 写超时（ms），防止 zero window 阻塞。默认 5000</summary>
+    public ushort write_timeout_ms;
     /// <summary>per-peer 发送队列上限。满时返回 SendQueueFull。默认 128</summary>
     public ushort send_queue_capacity;
+    /// <summary>incoming 消息队列容量。默认 256</summary>
+    public ushort incoming_queue_capacity;
     /// <summary>最大连接数。默认 64</summary>
     public ushort max_connections;
     /// <summary>TCP Keep-alive 空闲时间（秒），空闲多久后发送首个探测包。默认 60</summary>
@@ -159,7 +163,9 @@ public struct NetworkConfigFFI
         election_timeout_max_ms = 3000,
         reconnect_initial_ms = 1000,
         handshake_timeout_ms = 5000,
+        write_timeout_ms = 5000,
         send_queue_capacity = 128,
+        incoming_queue_capacity = 256,
         max_connections = 64,
         keepalive_time_secs = 60,
         keepalive_interval_secs = 10,
